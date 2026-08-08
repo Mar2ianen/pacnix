@@ -1,0 +1,29 @@
+pacoix is dual-licensed.
+
+This project is distributed under the terms of both the MIT license and the
+GNU General Public License v3.0 or later.
+
+    MIT OR GPL-3.0-or-later
+
+You may choose, at your option, to license your use of the pacnix source
+code under either of these licenses.
+
+- MIT:      see LICENSE-MIT
+- GPL-3.0:  see LICENSE-GPL-3.0-or-later
+
+Distribution of the built binary / combined product is governed by the GPL
+(GPL-3.0-or-later), because the combined product includes dependencies that
+are distributed under the GPL. The permissive MIT option is retained so that
+the project's own code can be reused permissively in the future, once GPL
+dependencies are no longer required.
+
+SPDX-License-Identifier: MIT OR GPL-3.0-or-later
+
+Copyright (c) 2026 pacnix contributors
+
+Summary:
+
+    own pacnix code      MIT OR GPL-3.0-or-later
+    GPL dependencies     GPL
+    copied GPL code      GPL
+    combined binary      distributed under GPL terms

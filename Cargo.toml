@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pacnix-core",
+    "crates/pacnix-cli",
+]
+
+[workspace.package]
+version = "0.0.0-pre"
+edition = "2021"
+license = "MIT OR GPL-3.0-or-later"
+authors = ["pacnix contributors"]

@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT OR GPL-3.0-or-later
+[package]
+name = "pacnix-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }

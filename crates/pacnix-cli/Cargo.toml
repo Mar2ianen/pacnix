@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT OR GPL-3.0-or-later
+[package]
+name = "pacnix-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pacnix-core = { path = "../pacnix-core" }
