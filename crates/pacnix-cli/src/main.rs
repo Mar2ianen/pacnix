@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
+use std::path::PathBuf;
+
 use pacnix_backend_alpm::AlpmBackend;
 use pacnix_backend_aur::AurBackend;
 use pacnix_backend_nix::NixBackend;
 use pacnix_core::{
-    Candidate, Command, Interaction, InstalledPackage, PackageBackend, Resolver, TargetSpec,
+    Candidate, Command, Interaction, InstalledPackage, PackageBackend, Resolver, Storage,
+    TargetSpec,
 };
 
 const VERBS: &[&str] = &["install", "remove", "search", "info", "list", "upgrade", "sync"];
@@ -57,6 +60,17 @@ fn default_registry() -> Vec<Box<dyn PackageBackend>> {
     ]
 }
 
+fn open_storage() -> Result<Storage, String> {
+    let dir: PathBuf = std::env::var_os("PACNIX_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+                .join(".local/state/pacnix")
+        });
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Storage::open(&dir.join("pacnix.db").to_string_lossy())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = match parse(&args) {
@@ -68,10 +82,16 @@ fn main() {
     };
 
     let resolver = Resolver::new(default_registry());
-    run(&resolver, command);
+    match open_storage() {
+        Ok(storage) => run(&resolver, &storage, command),
+        Err(e) => {
+            eprintln!("pacnix: storage: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
-fn run(resolver: &Resolver, command: Command) {
+fn run(resolver: &Resolver, storage: &Storage, command: Command) {
     match command {
         Command::Search(query) => {
             let result = resolver.resolve(&query);
@@ -98,6 +118,11 @@ fn run(resolver: &Resolver, command: Command) {
                 }
             }
             for pkg in &found {
+                if let Err(e) = storage.upsert_instance(pkg) {
+                    eprintln!("pacnix: storage: {e}");
+                }
+            }
+            for pkg in &found {
                 println!("{} {}", pkg.name, pkg.version.as_deref().unwrap_or("-"));
             }
         }
@@ -111,35 +136,58 @@ fn run(resolver: &Resolver, command: Command) {
                     eprintln!("pacnix: nothing found for: {}", target.query);
                     continue;
                 }
-                let interaction = if result.candidates.len() == 1 {
-                    Interaction::Confirm(
-                        select_backend(resolver, &result.candidates[0]).plan_install(&result.candidates[0])
-                            .unwrap_or_else(|e| {
-                                eprintln!("pacnix: {e}");
-                                std::process::exit(1);
-                            }),
-                    )
-                } else {
-                    Interaction::SelectCandidate(result.candidates)
-                };
-                match interaction {
+                if result.candidates.len() == 1 {
+                    let cand = &result.candidates[0];
+                    if let Err(e) = storage.remember_alias(&target.query, &cand.provider, &cand.name) {
+                        eprintln!("pacnix: storage: {e}");
+                    }
+                    let backend = select_backend(resolver, cand);
+                    match backend.plan_install(cand) {
+                        Ok(plan) => {
+                            println!(
+                                "plan: install {} from {}/{} ({} operations, privilege: {})",
+                                plan.name,
+                                cand.provider,
+                                cand.name,
+                                plan.operations.len(),
+                                plan.requires_privilege
+                            );
+                        }
+                        Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
+                    }
+                    continue;
+                }
+                match Interaction::SelectCandidate(result.candidates) {
                     Interaction::SelectCandidate(candidates) => {
                         println!("select candidate for {}:", target.query);
                         for (i, cand) in candidates.iter().enumerate() {
                             println!("  {}) {}/{}", i + 1, cand.provider, cand.name);
                         }
                     }
-                    Interaction::Confirm(plan) => {
-                        println!(
-                            "plan: {} {} operations={}",
-                            plan.backend_ref,
-                            plan.name,
-                            plan.operations.len()
-                        );
-                    }
-                    Interaction::RequestPrivilege(_) => println!("need privilege"),
+                    _ => unreachable!(),
                 }
             }
+        }
+        Command::Sync => {
+            let mut count = 0;
+            let mut errors = Vec::new();
+            for backend in resolver.backends() {
+                match backend.installed() {
+                    Ok(pkgs) => {
+                        for pkg in &pkgs {
+                            if let Err(e) = storage.upsert_instance(pkg) {
+                                errors.push(format!("{}: storage: {e}", backend.name()));
+                            }
+                        }
+                        count += pkgs.len();
+                    }
+                    Err(e) => errors.push(format!("{}: {e}", backend.name())),
+                }
+            }
+            for e in &errors {
+                eprintln!("pacnix: {e}");
+            }
+            println!("reconcile: {count} instances");
         }
         _ => {
             println!("(Phase 0 skeleton: not implemented yet)");

@@ -72,11 +72,11 @@ fn run_pacman(args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("failed to run pacman: {e}"))?;
     if !output.status.success() {
-        return Err(format!(
-            "pacman {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Ok(String::new());
+        }
+        return Err(format!("pacman {} failed: {stderr}", args.join(" ")));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }

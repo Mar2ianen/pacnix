@@ -4,6 +4,7 @@ pub mod backend;
 pub mod command;
 pub mod interaction;
 pub mod model;
+pub mod parsers;
 pub mod resolver;
 pub mod storage;
 

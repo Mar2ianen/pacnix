@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
 use pacnix_core::model::{Candidate, InstalledPackage, Source};
+use pacnix_core::parsers::parse_pairs;
 
 pub fn parse_search(output: &str) -> Vec<Candidate> {
     let mut candidates = Vec::new();
@@ -32,25 +33,34 @@ pub fn parse_search(output: &str) -> Vec<Candidate> {
 }
 
 pub fn parse_installed(output: &str) -> Vec<InstalledPackage> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim_end();
-            if line.is_empty() {
-                return None;
-            }
-            let (name, version) = line
-                .split_once(' ')
-                .map(|(n, v)| (n, Some(v.to_string())))
-                .unwrap_or((line, None));
-            Some(InstalledPackage {
+    parse_pairs(output)
+        .into_iter()
+        .map(|(name, version)| { 
+            InstalledPackage {
                 source: Source::Alpm,
                 backend_ref: format!("local/{name}"),
-                name: name.to_string(),
+                name,
                 version,
                 scope: None,
                 installed_at: None,
-            })
+            }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_search_output() {
+        let out = "extra/firefox 122.0-1\n    Standalone web browser\nchaotic-aur/foo-bin 1.2-3\n    Foo binary\n";
+        let candidates = parse_search(out);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].provider, "extra");
+        assert_eq!(candidates[0].name, "firefox");
+        assert_eq!(candidates[0].version.as_deref(), Some("122.0-1"));
+        assert_eq!(candidates[0].description.as_deref(), Some("Standalone web browser"));
+        assert_eq!(candidates[1].provider, "chaotic-aur");
+    }
 }

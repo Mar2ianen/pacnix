@@ -47,6 +47,7 @@ pub struct TransactionPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionOperation {
+    FetchAurSource { package: String },
     InstallPackage { package: String },
     RemovePackage { package: String },
     UpgradePackage { package: String },
