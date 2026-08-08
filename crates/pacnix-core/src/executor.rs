@@ -117,7 +117,7 @@ fn run_lane(plan: &BackendPlan<'_>) -> BackendReport {
                 package_name: pkg.name.clone(),
                 installed_backend: pkg.source.as_str().to_string(),
                 installed_backend_ref: pkg.backend_ref.clone(),
-                source: pkg.source.as_str().to_string(),
+                source: plan.backend.source().as_str().to_string(),
                 source_ref: plan.plan.backend_ref.clone(),
                 version: pkg.version.clone(),
                 installed_at: pkg.installed_at.unwrap_or_else(now),
