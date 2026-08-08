@@ -11,6 +11,9 @@ pub mod storage;
 pub use backend::PackageBackend;
 pub use command::Command;
 pub use interaction::{Interaction, PrivilegeProvider, PrivilegedOperation};
-pub use model::{Candidate, InstalledPackage, Provenance, Source, TargetSpec, TransactionPlan, TransactionOperation};
+pub use model::{
+    Candidate, InstallReceipt, InstalledPackage, Provenance, Source, TargetSpec,
+    TransactionOperation, TransactionPlan,
+};
 pub use resolver::{BackendError, ResolutionResult, Resolver};
 pub use storage::Storage;

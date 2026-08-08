@@ -6,11 +6,13 @@ use pacnix_backend_alpm::AlpmBackend;
 use pacnix_backend_aur::AurBackend;
 use pacnix_backend_nix::NixBackend;
 use pacnix_core::{
-    Candidate, Command, Interaction, InstalledPackage, PackageBackend, Resolver, Storage,
+    Candidate, Command, InstalledPackage, Interaction, PackageBackend, Resolver, Storage,
     TargetSpec,
 };
 
-const VERBS: &[&str] = &["install", "remove", "search", "info", "list", "upgrade", "sync"];
+const VERBS: &[&str] = &[
+    "install", "remove", "search", "info", "list", "upgrade", "sync",
+];
 
 fn parse(args: &[String]) -> Result<Command, String> {
     let first = args.first().ok_or("no command given")?;
@@ -49,7 +51,9 @@ fn parse(args: &[String]) -> Result<Command, String> {
 }
 
 fn to_targets(args: &[String]) -> Vec<TargetSpec> {
-    args.iter().map(|a| TargetSpec { query: a.clone() }).collect()
+    args.iter()
+        .map(|a| TargetSpec { query: a.clone() })
+        .collect()
 }
 
 fn default_registry() -> Vec<Box<dyn PackageBackend>> {
@@ -123,11 +127,20 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
                 }
             }
             for pkg in &found {
-                let mark = match pkg.provenance {
-                    pacnix_core::Provenance::Native => "",
-                    pacnix_core::Provenance::ForeignUnknown => " (foreign)",
+                let mark = match &pkg.provenance {
+                    pacnix_core::Provenance::SyncKnown => String::new(),
+                    pacnix_core::Provenance::Foreign => " (foreign)".to_string(),
+                    pacnix_core::Provenance::PacnixInstalled { source } => {
+                        format!(" (via pacnix: {source})")
+                    }
+                    pacnix_core::Provenance::Unknown => " (unknown)".to_string(),
                 };
-                println!("{} {}{}", pkg.name, pkg.version.as_deref().unwrap_or("-"), mark);
+                println!(
+                    "{} {}{}",
+                    pkg.name,
+                    pkg.version.as_deref().unwrap_or("-"),
+                    mark
+                );
             }
         }
         Command::Install(targets) => {
@@ -143,7 +156,9 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
                 if result.candidates.len() == 1 {
                     let cand = &result.candidates[0];
                     let backend_ref = format!("{}/{}", cand.provider, cand.name);
-                    if let Err(e) = storage.remember_alias(&target.query, cand.source.as_str(), &backend_ref) {
+                    if let Err(e) =
+                        storage.remember_alias(&target.query, cand.source.as_str(), &backend_ref)
+                    {
                         eprintln!("pacnix: storage: {e}");
                     }
                     let backend = select_backend(resolver, cand);
@@ -174,13 +189,28 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
             }
         }
         Command::Sync => {
+            let generation = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
             let mut count = 0;
             let mut errors = Vec::new();
+            let mut scanned: Vec<String> = Vec::new();
             for backend in resolver.backends() {
                 match backend.installed() {
                     Ok(pkgs) => {
+                        scanned.push(backend.name().to_string());
                         for pkg in &pkgs {
-                            if let Err(e) = storage.upsert_instance(pkg) {
+                            let mut pkg = pkg.clone();
+                            if pkg.provenance == pacnix_core::Provenance::Foreign {
+                                if let Ok(Some(source)) = storage.known_source_for(&pkg.name) {
+                                    pkg.provenance =
+                                        pacnix_core::Provenance::PacnixInstalled { source };
+                                }
+                            }
+                            if let Err(e) =
+                                storage.upsert_instance_with_generation(&pkg, generation)
+                            {
                                 errors.push(format!("{}: storage: {e}", backend.name()));
                             }
                         }
@@ -188,6 +218,14 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
                     }
                     Err(e) => errors.push(format!("{}: {e}", backend.name())),
                 }
+            }
+            match storage.sweep_stale_instances(generation, &scanned) {
+                Ok(removed) => {
+                    if removed > 0 {
+                        println!("reconcile: removed {removed} stale instances");
+                    }
+                }
+                Err(e) => errors.push(format!("storage: {e}")),
             }
             for e in &errors {
                 eprintln!("pacnix: {e}");

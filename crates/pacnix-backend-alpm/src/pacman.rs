@@ -30,10 +30,10 @@ impl PackageBackend for AlpmBackend {
     fn installed(&self) -> Result<Vec<InstalledPackage>, String> {
         let native = run_pacman(&["-Qn"])?;
         let foreign = run_pacman(&["-Qm"])?;
-        let mut pkgs = parsers::parse_installed(&native, pacnix_core::Provenance::Native);
+        let mut pkgs = parsers::parse_installed(&native, pacnix_core::Provenance::SyncKnown);
         pkgs.extend(parsers::parse_installed(
             &foreign,
-            pacnix_core::Provenance::ForeignUnknown,
+            pacnix_core::Provenance::Foreign,
         ));
         Ok(pkgs)
     }
@@ -109,7 +109,10 @@ mod tests {
 
     #[test]
     fn parse_installed_output() {
-        let parsed = parsers::parse_installed("firefox 122.0-1\nfoo 1.2-1\n", pacnix_core::Provenance::Native);
+        let parsed = parsers::parse_installed(
+            "firefox 122.0-1\nfoo 1.2-1\n",
+            pacnix_core::Provenance::SyncKnown,
+        );
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].name, "firefox");
         assert_eq!(parsed[0].version.as_deref(), Some("122.0-1"));

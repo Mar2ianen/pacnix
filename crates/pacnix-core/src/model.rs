@@ -34,8 +34,21 @@ impl Candidate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Provenance {
-    Native,
-    ForeignUnknown,
+    Unknown,
+    SyncKnown,
+    Foreign,
+    PacnixInstalled { source: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallReceipt {
+    pub package_name: String,
+    pub installed_backend: String,
+    pub installed_backend_ref: String,
+    pub source: String,
+    pub source_ref: String,
+    pub version: Option<String>,
+    pub installed_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

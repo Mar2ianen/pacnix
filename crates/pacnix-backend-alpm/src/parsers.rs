@@ -59,7 +59,10 @@ mod tests {
         assert_eq!(candidates[0].provider, "extra");
         assert_eq!(candidates[0].name, "firefox");
         assert_eq!(candidates[0].version.as_deref(), Some("122.0-1"));
-        assert_eq!(candidates[0].description.as_deref(), Some("Standalone web browser"));
+        assert_eq!(
+            candidates[0].description.as_deref(),
+            Some("Standalone web browser")
+        );
         assert_eq!(candidates[1].provider, "chaotic-aur");
     }
 }

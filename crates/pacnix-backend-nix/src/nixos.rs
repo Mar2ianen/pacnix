@@ -22,7 +22,10 @@ impl PackageBackend for NixBackend {
         Err("pacnix-backend-nix: not implemented yet".into())
     }
 
-    fn plan_install(&self, _target: &pacnix_core::model::Candidate) -> Result<TransactionPlan, String> {
+    fn plan_install(
+        &self,
+        _target: &pacnix_core::model::Candidate,
+    ) -> Result<TransactionPlan, String> {
         Err("pacnix-backend-nix: not implemented yet".into())
     }
 

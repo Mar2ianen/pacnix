@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::model::InstalledPackage;
 
@@ -32,18 +32,71 @@ impl Storage {
                 query          TEXT PRIMARY KEY,
                 backend        TEXT NOT NULL,
                 backend_ref    TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS install_receipts (
+                id                  INTEGER PRIMARY KEY,
+                package_name        TEXT NOT NULL,
+                installed_backend   TEXT NOT NULL,
+                installed_backend_ref TEXT NOT NULL,
+                source              TEXT NOT NULL,
+                source_ref          TEXT NOT NULL,
+                version             TEXT,
+                installed_at        INTEGER NOT NULL
              );",
         )
         .map_err(|e| e.to_string())?;
-        match conn.execute_batch("ALTER TABLE installed_instances ADD COLUMN provenance TEXT") {
-            Ok(()) => {}
-            Err(e) if e.to_string().contains("duplicate column name") => {}
-            Err(e) => return Err(e.to_string()),
+        for column in ["provenance", "seen_generation"] {
+            let sql = format!("ALTER TABLE installed_instances ADD COLUMN {column} TEXT");
+            match conn.execute_batch(&sql) {
+                Ok(()) => {}
+                Err(e) if e.to_string().contains("duplicate column name") => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        conn.execute_batch("DELETE FROM installed_instances WHERE backend = 'aur'")
+            .map_err(|e| e.to_string())?;
+        {
+            let legacy: Vec<(String, String, String)> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT query, backend, backend_ref FROM aliases
+                         WHERE backend NOT IN ('alpm', 'aur', 'nix') OR backend_ref NOT LIKE '%/%'",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(|e| e.to_string())?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(|e| e.to_string())?);
+                }
+                out
+            };
+            for (query, backend, backend_ref) in legacy {
+                let new_backend = if backend == "aur" { "aur" } else { "alpm" };
+                let new_ref = format!("{backend}/{backend_ref}");
+                conn.execute(
+                    "UPDATE aliases SET backend = ?2, backend_ref = ?3 WHERE query = ?1",
+                    params![query, new_backend, new_ref],
+                )
+                .map_err(|e| e.to_string())?;
+            }
         }
         Ok(Self { conn })
     }
 
-    pub fn remember_alias(&self, query: &str, backend: &str, backend_ref: &str) -> Result<(), String> {
+    pub fn remember_alias(
+        &self,
+        query: &str,
+        backend: &str,
+        backend_ref: &str,
+    ) -> Result<(), String> {
         self.conn
             .execute(
                 "INSERT INTO aliases (query, backend, backend_ref)
@@ -72,8 +125,15 @@ impl Storage {
         }
     }
 
-    pub fn upsert_instance(&self, pkg: &InstalledPackage) -> Result<(), String> {
-        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    pub fn upsert_instance_with_generation(
+        &self,
+        pkg: &InstalledPackage,
+        generation: u64,
+    ) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO packages (canonical_name) VALUES (?1)
              ON CONFLICT DO NOTHING",
@@ -93,13 +153,14 @@ impl Storage {
             .unwrap_or(0);
         tx.execute(
             "INSERT INTO installed_instances
-             (package_id, backend, backend_ref, version, scope, provenance, installed_at, last_seen_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             (package_id, backend, backend_ref, version, scope, provenance, installed_at, last_seen_at, seen_generation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(backend, backend_ref) DO UPDATE SET
                 version = excluded.version,
                 scope = excluded.scope,
                 provenance = excluded.provenance,
-                last_seen_at = excluded.last_seen_at",
+                last_seen_at = excluded.last_seen_at,
+                seen_generation = excluded.seen_generation",
             params![
                 package_id,
                 pkg.source.as_str(),
@@ -108,18 +169,82 @@ impl Storage {
                 pkg.scope,
                 provenance_str(&pkg.provenance),
                 pkg.installed_at,
-                now
+                now,
+                generation as i64
             ],
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
     }
+
+    pub fn upsert_instance(&self, pkg: &InstalledPackage) -> Result<(), String> {
+        self.upsert_instance_with_generation(pkg, 0)
+    }
+
+    pub fn sweep_stale_instances(
+        &self,
+        generation: u64,
+        backends: &[String],
+    ) -> Result<usize, String> {
+        let mut removed = 0;
+        for backend in backends {
+            removed += self
+                .conn
+                .execute(
+                    "DELETE FROM installed_instances
+                     WHERE backend = ?1 AND seen_generation != ?2",
+                    params![backend, generation as i64],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(removed)
+    }
+
+    pub fn record_receipt(&self, receipt: &crate::model::InstallReceipt) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO install_receipts
+                 (package_name, installed_backend, installed_backend_ref, source, source_ref, version, installed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    receipt.package_name,
+                    receipt.installed_backend,
+                    receipt.installed_backend_ref,
+                    receipt.source,
+                    receipt.source_ref,
+                    receipt.version,
+                    receipt.installed_at
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn known_source_for(&self, package_name: &str) -> Result<Option<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT source FROM install_receipts
+                 WHERE package_name = ?1 ORDER BY installed_at DESC LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query_map(params![package_name], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        match rows.next() {
+            Some(Ok(source)) => Ok(Some(source)),
+            Some(Err(e)) => Err(e.to_string()),
+            None => Ok(None),
+        }
+    }
 }
 
 fn provenance_str(provenance: &crate::model::Provenance) -> &'static str {
     match provenance {
-        crate::model::Provenance::Native => "native",
-        crate::model::Provenance::ForeignUnknown => "foreign-unknown",
+        crate::model::Provenance::Unknown => "unknown",
+        crate::model::Provenance::SyncKnown => "sync-known",
+        crate::model::Provenance::Foreign => "foreign",
+        crate::model::Provenance::PacnixInstalled { .. } => "pacnix-installed",
     }
 }
 
@@ -130,12 +255,89 @@ mod tests {
     use crate::Source;
 
     fn tmp_db() -> Storage {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = format!(
-            "/tmp/pacnix-test-{}.db",
-            std::process::id()
+            "/tmp/pacnix-test-{}-{}.db",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         );
         let _ = std::fs::remove_file(&path);
         Storage::open(&path).unwrap()
+    }
+
+    #[test]
+    fn migrates_legacy_alias_format() {
+        let path = format!("/tmp/pacnix-test-legacy-{}.db", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE aliases (
+                    query TEXT PRIMARY KEY,
+                    backend TEXT NOT NULL,
+                    backend_ref TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO aliases (query, backend, backend_ref) VALUES
+                 ('firefox', 'extra', 'firefox'),
+                 ('hiddify', 'aur', 'hiddify-bin')",
+                [],
+            )
+            .unwrap();
+        }
+        let storage = Storage::open(&path).unwrap();
+        assert_eq!(
+            storage.alias("firefox").unwrap(),
+            Some(("alpm".to_string(), "extra/firefox".to_string()))
+        );
+        assert_eq!(
+            storage.alias("hiddify").unwrap(),
+            Some(("aur".to_string(), "aur/hiddify-bin".to_string()))
+        );
+    }
+
+    #[test]
+    fn sweep_removes_stale_instances() {
+        let storage = tmp_db();
+        let pkg = InstalledPackage {
+            source: Source::Alpm,
+            backend_ref: "local/oldpkg".into(),
+            name: "oldpkg".into(),
+            version: None,
+            scope: None,
+            installed_at: None,
+            provenance: crate::Provenance::Foreign,
+        };
+        storage.upsert_instance_with_generation(&pkg, 1).unwrap();
+        let pkg2 = InstalledPackage {
+            name: "newpkg".into(),
+            backend_ref: "local/newpkg".into(),
+            ..pkg.clone()
+        };
+        storage.upsert_instance_with_generation(&pkg2, 2).unwrap();
+        let removed = storage
+            .sweep_stale_instances(2, &["alpm".to_string()])
+            .unwrap();
+        assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn receipt_roundtrip() {
+        let storage = tmp_db();
+        let receipt = crate::InstallReceipt {
+            package_name: "foo".into(),
+            installed_backend: "alpm".into(),
+            installed_backend_ref: "local/foo".into(),
+            source: "aur".into(),
+            source_ref: "aur/foo-bin".into(),
+            version: Some("1.0-1".into()),
+            installed_at: 42,
+        };
+        storage.record_receipt(&receipt).unwrap();
+        assert_eq!(storage.known_source_for("foo").unwrap(), Some("aur".into()));
+        assert_eq!(storage.known_source_for("bar").unwrap(), None);
     }
 
     #[test]
@@ -168,7 +370,7 @@ mod tests {
             version: Some("1.0-1".into()),
             scope: None,
             installed_at: Some(1),
-            provenance: crate::Provenance::Native,
+            provenance: crate::Provenance::SyncKnown,
         };
         storage.upsert_instance(&pkg).unwrap();
         let updated = InstalledPackage {
