@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Command;
 
 use pacnix_core::model::{
@@ -19,17 +20,40 @@ fn local_install_dates() -> HashMap<String, i64> {
     let Ok(entries) = std::fs::read_dir("/var/lib/pacman/local") else {
         return dates;
     };
-    for entry in entries.flatten() {
-        let Ok(content) = std::fs::read_to_string(entry.path().join("desc")) else {
-            continue;
-        };
-        let name = parsers::desc_field(&content, "%NAME%");
-        let date =
-            parsers::desc_field(&content, "%INSTALLDATE%").and_then(|d| d.parse::<i64>().ok());
-        if let (Some(name), Some(date)) = (name, date) {
-            dates.insert(name, date);
-        }
+    let dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    if dirs.is_empty() {
+        return dates;
     }
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(1);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for chunk in dirs.chunks(dirs.len().div_ceil(workers)) {
+            let chunk = chunk.to_vec();
+            handles.push(scope.spawn(move || {
+                let mut sub = HashMap::new();
+                for path in chunk {
+                    let Ok(content) = std::fs::read_to_string(path.join("desc")) else {
+                        continue;
+                    };
+                    let name = parsers::desc_field(&content, "%NAME%");
+                    let date = parsers::desc_field(&content, "%INSTALLDATE%")
+                        .and_then(|d| d.parse::<i64>().ok());
+                    if let (Some(name), Some(date)) = (name, date) {
+                        sub.insert(name, date);
+                    }
+                }
+                sub
+            }));
+        }
+        for handle in handles {
+            if let Ok(sub) = handle.join() {
+                dates.extend(sub);
+            }
+        }
+    });
     dates
 }
 

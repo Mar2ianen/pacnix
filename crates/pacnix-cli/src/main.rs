@@ -283,6 +283,9 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
     let mut ok = true;
     for (report, item) in reports.iter().zip(planned.iter()) {
         if report.error.is_none() {
+            if !report.receipts.is_empty() {
+                println!(":: Installed {}", item.candidate.name);
+            }
             if let Err(e) = storage.remember_alias(
                 &item.query,
                 item.candidate.source.as_str(),
@@ -295,11 +298,12 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
         }
     }
     if ok {
+        println!(":: Reconciling authoritative state...");
         let (_count, removed) = reconcile(resolver, storage);
         if removed > 0 {
-            println!(":: Reconciled authoritative state (removed {removed} stale instances)");
+            println!(":: Reconciled (removed {removed} stale instances)");
         } else {
-            println!(":: Reconciled authoritative state");
+            println!(":: Reconciled");
         }
     } else {
         println!(":: partial failure: some lanes failed; run `pacnix sync` to reconcile");
@@ -375,11 +379,15 @@ fn run_remove(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], op
     );
     report_outcomes(&reports);
     if reports.iter().all(|r| r.error.is_none()) {
+        for item in &planned {
+            println!(":: Removed {}", item.pkg.name);
+        }
+        println!(":: Reconciling authoritative state...");
         let (_count, removed) = reconcile(resolver, storage);
         if removed > 0 {
-            println!(":: Reconciled authoritative state (removed {removed} stale instances)");
+            println!(":: Reconciled (removed {removed} stale instances)");
         } else {
-            println!(":: Reconciled authoritative state");
+            println!(":: Reconciled");
         }
     } else {
         println!(":: partial failure; run `pacnix sync` to reconcile");
@@ -424,8 +432,11 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
         planned.iter().map(|p| (p.backend, &p.plan)).collect();
     let reports = execute_plans(storage, &pairs);
     report_outcomes(&reports);
+    if reports.iter().all(|r| r.error.is_none()) {
+        println!(":: Reconciling authoritative state...");
+    }
     reconcile(resolver, storage);
-    println!(":: Reconciled authoritative state");
+    println!(":: Reconciled");
 }
 
 fn execute_plans(
@@ -594,6 +605,7 @@ fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
     let mut count = 0;
     let mut errors = Vec::new();
     let mut scanned: Vec<String> = Vec::new();
+    let mut upserts: Vec<InstalledPackage> = Vec::new();
     for backend in resolver.backends() {
         let pkgs = match backend.installed() {
             Ok(pkgs) => pkgs,
@@ -602,7 +614,7 @@ fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
                 continue;
             }
         };
-        let mut backend_ok = true;
+        let backend_ok = true;
         for pkg in &pkgs {
             let mut pkg = pkg.clone();
             if pkg.provenance == pacnix_core::Provenance::Foreign && pkg.installed_at.is_some() {
@@ -628,15 +640,15 @@ fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
                     pkg.provenance = pacnix_core::Provenance::PacnixInstalled { source };
                 }
             }
-            if let Err(e) = storage.upsert_instance_with_generation(&pkg, generation) {
-                backend_ok = false;
-                errors.push(format!("{}: storage: {e}", backend.name()));
-            }
+            upserts.push(pkg);
         }
         if backend_ok {
             scanned.push(backend.name().to_string());
         }
         count += pkgs.len();
+    }
+    if let Err(e) = storage.upsert_instances_with_generation(&upserts, generation) {
+        errors.push(format!("storage: {e}"));
     }
     let removed = match storage.sweep_stale_instances(generation, &scanned) {
         Ok(removed) => removed,
