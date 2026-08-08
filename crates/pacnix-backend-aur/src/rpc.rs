@@ -38,6 +38,7 @@ pub fn to_candidates(packages: Vec<AurPackage>) -> Vec<Candidate> {
         .map(|p| Candidate {
             source: Source::Aur,
             provider: "aur".to_string(),
+            backend_ref: format!("aur/{}", p.name),
             name: p.name,
             version: p.version,
             description: p.description,

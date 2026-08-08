@@ -155,10 +155,11 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
                 }
                 if result.candidates.len() == 1 {
                     let cand = &result.candidates[0];
-                    let backend_ref = format!("{}/{}", cand.provider, cand.name);
-                    if let Err(e) =
-                        storage.remember_alias(&target.query, cand.source.as_str(), &backend_ref)
-                    {
+                    if let Err(e) = storage.remember_alias(
+                        &target.query,
+                        cand.source.as_str(),
+                        &cand.backend_ref,
+                    ) {
                         eprintln!("pacnix: storage: {e}");
                     }
                     let backend = select_backend(resolver, cand);
@@ -207,13 +208,27 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
                 let mut backend_ok = true;
                 for pkg in &pkgs {
                     let mut pkg = pkg.clone();
-                    if pkg.provenance == pacnix_core::Provenance::Foreign {
+                    if pkg.provenance == pacnix_core::Provenance::Foreign
+                        && pkg.installed_at.is_some()
+                    {
                         if let Ok(Some(source)) = storage.known_source_for(
                             &pkg.name,
                             pkg.source.as_str(),
                             &pkg.backend_ref,
                             pkg.version.as_deref(),
                             pkg.installed_at,
+                        ) {
+                            pkg.provenance = pacnix_core::Provenance::PacnixInstalled { source };
+                        }
+                    } else if pkg.provenance == pacnix_core::Provenance::Unknown
+                        && pkg.installed_at.is_none()
+                    {
+                        if let Ok(Some(source)) = storage.known_source_for(
+                            &pkg.name,
+                            pkg.source.as_str(),
+                            &pkg.backend_ref,
+                            pkg.version.as_deref(),
+                            None,
                         ) {
                             pkg.provenance = pacnix_core::Provenance::PacnixInstalled { source };
                         }

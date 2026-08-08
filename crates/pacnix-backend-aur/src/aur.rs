@@ -58,7 +58,7 @@ impl PackageBackend for AurBackend {
 
     fn plan_install(&self, target: &Candidate) -> Result<TransactionPlan, String> {
         Ok(TransactionPlan {
-            backend_ref: format!("aur/{}", target.name),
+            backend_ref: target.backend_ref.clone(),
             name: target.name.clone(),
             operations: vec![
                 TransactionOperation::FetchAurSource {

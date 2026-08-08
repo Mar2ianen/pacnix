@@ -35,6 +35,7 @@ pub fn parse_search(output: &str) -> Vec<Candidate> {
         candidates.push(Candidate {
             source: Source::Alpm,
             provider: provider.to_string(),
+            backend_ref: prefix.to_string(),
             name: name.to_string(),
             version: Some(rest.to_string()),
             description,

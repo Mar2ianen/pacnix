@@ -64,7 +64,7 @@ impl PackageBackend for AlpmBackend {
 
     fn plan_install(&self, target: &Candidate) -> Result<TransactionPlan, String> {
         Ok(TransactionPlan {
-            backend_ref: format!("{}/{}", target.provider, target.name),
+            backend_ref: target.backend_ref.clone(),
             name: target.name.clone(),
             operations: vec![TransactionOperation::InstallPackage {
                 package: target.name.clone(),

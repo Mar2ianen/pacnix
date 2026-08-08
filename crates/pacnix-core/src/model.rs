@@ -21,6 +21,7 @@ impl Source {
 pub struct Candidate {
     pub source: Source,
     pub provider: String,
+    pub backend_ref: String,
     pub name: String,
     pub version: Option<String>,
     pub description: Option<String>,
@@ -83,5 +84,5 @@ pub enum TransactionOperation {
     UpgradePackage { package: String },
     ProfileInstall { profile: String, attr: String },
     ProfileRemove { profile: String, attr: String },
-    ProfileUpgrade { profile: String },
+    ProfileUpgrade { profile: String, element: String },
 }

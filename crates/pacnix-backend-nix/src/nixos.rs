@@ -25,7 +25,7 @@ impl PackageBackend for NixBackend {
 
     fn search(&self, query: &str) -> Result<Vec<Candidate>, String> {
         let output = run_nix(&["search", "nixpkgs", query, "--json"])?;
-        Ok(parsers::parse_search(&output))
+        parsers::parse_search(&output)
     }
 
     fn installed(&self) -> Result<Vec<InstalledPackage>, String> {
@@ -35,11 +35,11 @@ impl PackageBackend for NixBackend {
 
     fn plan_install(&self, target: &Candidate) -> Result<TransactionPlan, String> {
         Ok(TransactionPlan {
-            backend_ref: format!("{}#{}", target.provider, target.name),
+            backend_ref: target.backend_ref.clone(),
             name: target.name.clone(),
             operations: vec![TransactionOperation::ProfileInstall {
                 profile: "default".into(),
-                attr: format!("{}#{}", target.provider, target.name),
+                attr: target.backend_ref.clone(),
             }],
             requires_privilege: false,
         })
@@ -57,12 +57,13 @@ impl PackageBackend for NixBackend {
         })
     }
 
-    fn plan_upgrade(&self, _target: &InstalledPackage) -> Result<TransactionPlan, String> {
+    fn plan_upgrade(&self, target: &InstalledPackage) -> Result<TransactionPlan, String> {
         Ok(TransactionPlan {
-            backend_ref: "default".into(),
-            name: String::new(),
+            backend_ref: target.backend_ref.clone(),
+            name: target.name.clone(),
             operations: vec![TransactionOperation::ProfileUpgrade {
                 profile: "default".into(),
+                element: target.name.clone(),
             }],
             requires_privilege: false,
         })
@@ -101,19 +102,41 @@ mod tests {
         let cand = Candidate {
             source: Source::Nix,
             provider: "nixpkgs".into(),
+            backend_ref: "nixpkgs#legacyPackages.x86_64-linux.ripgrep".into(),
             name: "ripgrep".into(),
             version: Some("14.1.1".into()),
             description: None,
         };
         let plan = backend.plan_install(&cand).unwrap();
-        assert_eq!(plan.backend_ref, "nixpkgs#ripgrep");
+        assert_eq!(
+            plan.backend_ref,
+            "nixpkgs#legacyPackages.x86_64-linux.ripgrep"
+        );
         assert_eq!(
             plan.operations,
             vec![TransactionOperation::ProfileInstall {
                 profile: "default".into(),
-                attr: "nixpkgs#ripgrep".into(),
+                attr: "nixpkgs#legacyPackages.x86_64-linux.ripgrep".into(),
             }]
         );
         assert!(!plan.requires_privilege);
+
+        let target = InstalledPackage {
+            source: Source::Nix,
+            backend_ref: "/nix/store/000-ripgrep-14.1.1".into(),
+            name: "ripgrep".into(),
+            version: Some("14.1.1".into()),
+            scope: None,
+            installed_at: None,
+            provenance: pacnix_core::Provenance::Unknown,
+        };
+        let upgrade = backend.plan_upgrade(&target).unwrap();
+        assert_eq!(
+            upgrade.operations,
+            vec![TransactionOperation::ProfileUpgrade {
+                profile: "default".into(),
+                element: "ripgrep".into(),
+            }]
+        );
     }
 }

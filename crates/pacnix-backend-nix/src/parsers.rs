@@ -60,27 +60,27 @@ fn split_version(store_path: &str) -> Option<String> {
         None
     }
 }
-
-pub fn parse_search(output: &str) -> Vec<Candidate> {
-    let Ok(parsed) = serde_json::from_str::<std::collections::BTreeMap<String, SearchHit>>(output)
-    else {
-        return Vec::new();
-    };
-    parsed
-        .into_iter()
-        .filter_map(|(full_attr, hit)| {
-            let name = hit
-                .pname
-                .or_else(|| full_attr.rsplit('.').next().map(|s| s.to_string()))?;
-            Some(Candidate {
-                source: Source::Nix,
-                provider: "nixpkgs".to_string(),
-                name,
-                version: hit.version,
-                description: hit.description,
-            })
-        })
-        .collect()
+pub fn parse_search(output: &str) -> Result<Vec<Candidate>, String> {
+    let parsed: std::collections::BTreeMap<String, SearchHit> =
+        serde_json::from_str(output).map_err(|e| format!("bad `nix search --json` output: {e}"))?;
+    let mut candidates = Vec::new();
+    for (full_attr, hit) in parsed {
+        let Some(name) = hit
+            .pname
+            .or_else(|| full_attr.rsplit('.').next().map(|s| s.to_string()))
+        else {
+            continue;
+        };
+        candidates.push(Candidate {
+            source: Source::Nix,
+            provider: "nixpkgs".to_string(),
+            backend_ref: format!("nixpkgs#{full_attr}"),
+            name,
+            version: hit.version,
+            description: hit.description,
+        });
+    }
+    Ok(candidates)
 }
 
 #[cfg(test)]
@@ -134,11 +134,38 @@ mod tests {
                 "description": "A utility that combines the usability of The Silver Searcher"
             }
         }"#;
-        let candidates = parse_search(fixture);
+        let candidates = parse_search(fixture).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "ripgrep");
         assert_eq!(candidates[0].provider, "nixpkgs");
+        assert_eq!(
+            candidates[0].backend_ref,
+            "nixpkgs#legacyPackages.x86_64-linux.ripgrep"
+        );
         assert_eq!(candidates[0].version.as_deref(), Some("14.1.1"));
+    }
+
+    #[test]
+    fn search_keeps_nested_attr_installable() {
+        let fixture = r#"{
+            "legacyPackages.x86_64-linux.gnome3.vala": {
+                "pname": "vala",
+                "version": "0.56.0",
+                "description": null
+            }
+        }"#;
+        let candidates = parse_search(fixture).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].backend_ref,
+            "nixpkgs#legacyPackages.x86_64-linux.gnome3.vala"
+        );
+        assert_eq!(candidates[0].name, "vala");
+    }
+
+    #[test]
+    fn search_rejects_malformed_json() {
+        assert!(parse_search("not json").is_err());
     }
 
     #[test]
