@@ -135,6 +135,32 @@ impl PackageBackend for AlpmBackend {
         Ok(parsers::parse_installed_size(&output))
     }
 
+    fn remove_size_estimate(&self, target: &InstalledPackage) -> Result<Option<u64>, String> {
+        let output = match run_pacman(&["-Qi", &target.name]) {
+            Ok(out) => out,
+            Err(_) => return Ok(None),
+        };
+        Ok(parsers::parse_installed_size(&output))
+    }
+
+    fn upgrade_delta_estimate(&self, name: &str) -> Result<Option<i64>, String> {
+        let new_out = match run_pacman(&["-Si", name]) {
+            Ok(out) => out,
+            Err(_) => return Ok(None),
+        };
+        let old_out = match run_pacman(&["-Qi", name]) {
+            Ok(out) => out,
+            Err(_) => return Ok(None),
+        };
+        match (
+            parsers::parse_installed_size(&new_out),
+            parsers::parse_installed_size(&old_out),
+        ) {
+            (Some(new), Some(old)) => Ok(Some(new as i64 - old as i64)),
+            _ => Ok(None),
+        }
+    }
+
     fn receipt_instances(
         &self,
         plan: &TransactionPlan,

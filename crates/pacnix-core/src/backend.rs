@@ -19,6 +19,12 @@ pub trait PackageBackend: Send + Sync {
     fn install_size_estimate(&self, _target: &Candidate) -> Result<Option<u64>, String> {
         Ok(None)
     }
+    fn remove_size_estimate(&self, _target: &InstalledPackage) -> Result<Option<u64>, String> {
+        Ok(None)
+    }
+    fn upgrade_delta_estimate(&self, _name: &str) -> Result<Option<i64>, String> {
+        Ok(None)
+    }
     fn execute_operation(
         &self,
         op: &TransactionOperation,

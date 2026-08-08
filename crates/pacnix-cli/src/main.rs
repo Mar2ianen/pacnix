@@ -574,12 +574,12 @@ fn print_install_summary(planned: &[PlannedInstall]) {
     }
     for (backend, items) in &by_backend {
         println!("{backend} ({})", items.len());
-        for item in items {
-            let size = item
-                .backend
-                .install_size_estimate(&item.candidate)
-                .ok()
-                .flatten();
+        let sizes: Vec<Option<u64>> = items
+            .iter()
+            .map(|i| i.backend.install_size_estimate(&i.candidate).ok().flatten())
+            .collect();
+        let total: u64 = sizes.iter().flatten().sum();
+        for (item, size) in items.iter().zip(sizes) {
             match size {
                 Some(b) => println!(
                     "  {}/{} ({} disk)",
@@ -589,6 +589,9 @@ fn print_install_summary(planned: &[PlannedInstall]) {
                 ),
                 None => println!("  {}/{}", item.candidate.provider, item.candidate.name),
             }
+        }
+        if total > 0 {
+            println!("  Total: {} disk", human_size(total));
         }
     }
     println!();
@@ -608,16 +611,57 @@ fn human_size(bytes: u64) -> String {
 
 fn print_removal_summary(planned: &[PlannedRemoval]) {
     println!("\n:: Packages to remove");
-    for item in planned {
-        println!("  {} via {}", item.pkg.name, item.backend.name());
+    let sizes: Vec<Option<u64>> = planned
+        .iter()
+        .map(|i| i.backend.remove_size_estimate(&i.pkg).ok().flatten())
+        .collect();
+    let total: u64 = sizes.iter().flatten().sum();
+    for (item, size) in planned.iter().zip(sizes) {
+        match size {
+            Some(b) => println!(
+                "  {} ({} freed) via {}",
+                item.pkg.name,
+                human_size(b),
+                item.backend.name()
+            ),
+            None => println!("  {} via {}", item.pkg.name, item.backend.name()),
+        }
+    }
+    if total > 0 {
+        println!("  Total: {} freed", human_size(total));
     }
     println!();
 }
 
 fn print_upgrade_summary(planned: &[PlannedUpgrade]) {
     println!("\n:: Packages to upgrade");
-    for item in planned {
-        println!("  {} via {}", item.plan.name, item.backend.name());
+    let deltas: Vec<Option<i64>> = planned
+        .iter()
+        .map(|i| {
+            i.backend
+                .upgrade_delta_estimate(&i.plan.name)
+                .ok()
+                .flatten()
+        })
+        .collect();
+    let total: i64 = deltas.iter().flatten().sum();
+    for (item, delta) in planned.iter().zip(deltas) {
+        match delta {
+            Some(d) => println!(
+                "  {} (Δ{} disk) via {}",
+                item.plan.name,
+                human_size(d.unsigned_abs()),
+                item.backend.name()
+            ),
+            None => println!("  {} via {}", item.plan.name, item.backend.name()),
+        }
+    }
+    if total != 0 {
+        println!(
+            "  Total: {} {} disk",
+            if total < 0 { "-" } else { "+" },
+            human_size(total.unsigned_abs())
+        );
     }
     println!();
 }
