@@ -113,9 +113,9 @@ mod tests {
     #[test]
     fn parses_size_from_si_and_qi_output() {
         let si = "Repository      : extra\nName            : blender\nVersion         : 17:5.2.0-4\nInstalled Size  : 381.68 MiB\n";
-        let qi = "Name            : a52dec\nVersion         : 0.8.0-3\nInstalled Size  : 135440\nBuild Date      : ...\n";
+        let qi = "Name            : a52dec\nVersion         : 0.8.0-3\nInstalled Size  : 132.34 KiB\nBuild Date      : ...\n";
         assert_eq!(parse_installed_size(si), Some(400_220_488));
-        assert_eq!(parse_installed_size(qi), Some(135440));
+        assert_eq!(parse_installed_size(qi), Some(135516));
         assert_eq!(parse_installed_size("Name : foo\n"), None);
     }
 }
