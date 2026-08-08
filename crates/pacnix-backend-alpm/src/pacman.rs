@@ -163,13 +163,15 @@ fn run_pacman_elevated(ctx: &ExecutionContext, args: &[&str]) -> Result<(), Stri
         command = Command::new("sudo");
         command.arg(PACMAN);
     }
-    let output = command
+    let status = command
         .args(args)
-        .output()
+        .status()
         .map_err(|e| format!("failed to run pacman: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("pacman {} failed: {stderr}", args.join(" ")));
+    if !status.success() {
+        return Err(format!(
+            "pacman {} failed with status {status}",
+            args.join(" ")
+        ));
     }
     Ok(())
 }

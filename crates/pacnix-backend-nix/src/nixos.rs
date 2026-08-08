@@ -157,15 +157,17 @@ fn run_nix(args: &[&str]) -> Result<String, String> {
 }
 
 fn run_nix_mutating(args: &[&str]) -> Result<(), String> {
-    let output = Command::new(NIX)
+    let status = Command::new(NIX)
         .arg("--extra-experimental-features")
         .arg(EXPERIMENTAL)
         .args(args)
-        .output()
+        .status()
         .map_err(|e| format!("failed to run nix: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("nix {} failed: {stderr}", args.join(" ")));
+    if !status.success() {
+        return Err(format!(
+            "nix {} failed with status {status}",
+            args.join(" ")
+        ));
     }
     Ok(())
 }

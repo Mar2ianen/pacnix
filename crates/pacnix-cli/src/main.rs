@@ -263,6 +263,7 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
         eprintln!("pacnix: aborted");
         return;
     }
+    println!(":: Installing...");
     let reports = {
         let batch = ExecutionBatch {
             plans: planned
@@ -364,6 +365,7 @@ fn run_remove(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], op
         eprintln!("pacnix: aborted");
         return;
     }
+    println!(":: Removing...");
     let reports = execute_plans(
         storage,
         &planned
@@ -417,6 +419,7 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
         eprintln!("pacnix: aborted");
         return;
     }
+    println!(":: Upgrading...");
     let pairs: Vec<(&dyn PackageBackend, &TransactionPlan)> =
         planned.iter().map(|p| (p.backend, &p.plan)).collect();
     let reports = execute_plans(storage, &pairs);
