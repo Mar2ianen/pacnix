@@ -130,6 +130,11 @@ impl PackageBackend for AlpmBackend {
         })
     }
 
+    fn install_size_estimate(&self, target: &Candidate) -> Result<Option<u64>, String> {
+        let output = run_pacman(&["-Si", &target.backend_ref])?;
+        Ok(parsers::parse_installed_size(&output))
+    }
+
     fn receipt_instances(
         &self,
         plan: &TransactionPlan,

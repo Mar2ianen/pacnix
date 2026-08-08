@@ -16,6 +16,9 @@ pub trait PackageBackend: Send + Sync {
     fn plan_remove(&self, target: &InstalledPackage) -> Result<TransactionPlan, String>;
     fn plan_upgrade(&self, target: &InstalledPackage) -> Result<TransactionPlan, String>;
     fn plan_upgrade_all(&self) -> Result<TransactionPlan, String>;
+    fn install_size_estimate(&self, _target: &Candidate) -> Result<Option<u64>, String> {
+        Ok(None)
+    }
     fn execute_operation(
         &self,
         op: &TransactionOperation,

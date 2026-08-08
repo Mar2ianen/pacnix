@@ -14,6 +14,30 @@ pub fn desc_field(content: &str, field: &str) -> Option<String> {
     }
 }
 
+pub fn parse_installed_size(output: &str) -> Option<u64> {
+    let value = output.lines().find_map(|line| {
+        let (key, rest) = line.split_once(':')?;
+        if key.trim_end() != "Installed Size" {
+            return None;
+        }
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return None;
+        }
+        Some(rest)
+    })?;
+    let (amount, unit) = value.split_once(' ')?;
+    let amount = amount.parse::<f64>().ok()?;
+    let bytes = match unit {
+        "B" => amount,
+        "KiB" => amount * 1024.0,
+        "MiB" => amount * 1024.0 * 1024.0,
+        "GiB" => amount * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some(bytes.round() as u64)
+}
+
 pub fn parse_search(output: &str) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     let mut lines = output.lines();

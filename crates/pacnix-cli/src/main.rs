@@ -575,10 +575,35 @@ fn print_install_summary(planned: &[PlannedInstall]) {
     for (backend, items) in &by_backend {
         println!("{backend} ({})", items.len());
         for item in items {
-            println!("  {}/{}", item.candidate.provider, item.candidate.name);
+            let size = item
+                .backend
+                .install_size_estimate(&item.candidate)
+                .ok()
+                .flatten();
+            match size {
+                Some(b) => println!(
+                    "  {}/{} ({} disk)",
+                    item.candidate.provider,
+                    item.candidate.name,
+                    human_size(b)
+                ),
+                None => println!("  {}/{}", item.candidate.provider, item.candidate.name),
+            }
         }
     }
     println!();
+}
+
+fn human_size(bytes: u64) -> String {
+    let value = bytes as f64;
+    let units = ["B", "KiB", "MiB", "GiB"];
+    let mut unit = 0;
+    let mut amount = value;
+    while amount >= 1024.0 && unit < units.len() - 1 {
+        amount /= 1024.0;
+        unit += 1;
+    }
+    format!("{amount:.2} {}", units[unit])
 }
 
 fn print_removal_summary(planned: &[PlannedRemoval]) {
