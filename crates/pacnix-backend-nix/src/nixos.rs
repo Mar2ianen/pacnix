@@ -5,7 +5,7 @@ use std::process::Command;
 use pacnix_core::model::{
     Candidate, InstalledPackage, Source, TransactionOperation, TransactionPlan,
 };
-use pacnix_core::PackageBackend;
+use pacnix_core::{ExecutionContext, PackageBackend};
 
 use crate::parsers;
 
@@ -67,6 +67,41 @@ impl PackageBackend for NixBackend {
             }],
             requires_privilege: false,
         })
+    }
+
+    fn execute_operation(
+        &self,
+        op: &TransactionOperation,
+        _ctx: &ExecutionContext,
+    ) -> Result<(), String> {
+        match op {
+            TransactionOperation::ProfileInstall { profile, attr } => {
+                let mut args = vec!["profile", "install"];
+                profile_args(&mut args, profile);
+                args.push(attr);
+                run_nix(&args).map(|_| ())
+            }
+            TransactionOperation::ProfileRemove { profile, attr } => {
+                let mut args = vec!["profile", "remove"];
+                profile_args(&mut args, profile);
+                args.push(attr);
+                run_nix(&args).map(|_| ())
+            }
+            TransactionOperation::ProfileUpgrade { profile, element } => {
+                let mut args = vec!["profile", "upgrade"];
+                profile_args(&mut args, profile);
+                args.push(element);
+                run_nix(&args).map(|_| ())
+            }
+            _ => Err(format!("nix: unsupported operation {op:?}")),
+        }
+    }
+}
+
+fn profile_args<'a>(args: &mut Vec<&'a str>, profile: &'a str) {
+    if profile != "default" {
+        args.push("--profile");
+        args.push(profile);
     }
 }
 

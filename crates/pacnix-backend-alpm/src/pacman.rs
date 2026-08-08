@@ -6,7 +6,7 @@ use std::process::Command;
 use pacnix_core::model::{
     Candidate, InstalledPackage, Source, TransactionOperation, TransactionPlan,
 };
-use pacnix_core::PackageBackend;
+use pacnix_core::{ExecutionContext, PackageBackend};
 
 use crate::parsers;
 
@@ -94,6 +94,25 @@ impl PackageBackend for AlpmBackend {
             requires_privilege: true,
         })
     }
+
+    fn execute_operation(
+        &self,
+        op: &TransactionOperation,
+        ctx: &ExecutionContext,
+    ) -> Result<(), String> {
+        match op {
+            TransactionOperation::InstallPackage { package } => {
+                run_pacman_elevated(ctx, &["-S", "--noconfirm", package])
+            }
+            TransactionOperation::RemovePackage { package } => {
+                run_pacman_elevated(ctx, &["-R", "--noconfirm", package])
+            }
+            TransactionOperation::UpgradePackage { package } => {
+                run_pacman_elevated(ctx, &["-S", "--noconfirm", "--needed", package])
+            }
+            _ => Err(format!("alpm: unsupported operation {op:?}")),
+        }
+    }
 }
 
 fn run_pacman(args: &[&str]) -> Result<String, String> {
@@ -109,6 +128,23 @@ fn run_pacman(args: &[&str]) -> Result<String, String> {
         return Err(format!("pacman {} failed: {stderr}", args.join(" ")));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_pacman_elevated(ctx: &ExecutionContext, args: &[&str]) -> Result<(), String> {
+    let mut command = Command::new(PACMAN);
+    if ctx.use_sudo {
+        command = Command::new("sudo");
+        command.arg(PACMAN);
+    }
+    let output = command
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run pacman: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("pacman {} failed: {stderr}", args.join(" ")));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

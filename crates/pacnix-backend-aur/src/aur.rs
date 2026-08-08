@@ -3,7 +3,7 @@
 use pacnix_core::model::{
     Candidate, InstalledPackage, Source, TransactionOperation, TransactionPlan,
 };
-use pacnix_core::PackageBackend;
+use pacnix_core::{ExecutionContext, PackageBackend};
 
 use crate::rpc::{self, AurPackage};
 
@@ -92,6 +92,16 @@ impl PackageBackend for AurBackend {
             }],
             requires_privilege: true,
         })
+    }
+
+    fn execute_operation(
+        &self,
+        op: &TransactionOperation,
+        _ctx: &ExecutionContext,
+    ) -> Result<(), String> {
+        Err(format!(
+            "aur: execution pipeline not implemented yet: {op:?}"
+        ))
     }
 }
 

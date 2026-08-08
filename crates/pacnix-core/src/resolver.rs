@@ -21,8 +21,9 @@ pub enum Reason {
     ExactName,
     PrefixName,
     SubstringName,
+    BackendMatch,
     BackendPriority(&'static str),
-    PreferredProvider,
+    PreferredBackend,
     PreviousPreference,
 }
 
@@ -32,8 +33,9 @@ impl Reason {
             Reason::ExactName => "exact name match".into(),
             Reason::PrefixName => "prefix match".into(),
             Reason::SubstringName => "substring match".into(),
+            Reason::BackendMatch => "matched by backend".into(),
             Reason::BackendPriority(b) => format!("{b} backend priority"),
-            Reason::PreferredProvider => "preferred provider".into(),
+            Reason::PreferredBackend => "preferred backend".into(),
             Reason::PreviousPreference => "previous preference".into(),
         }
     }
@@ -50,12 +52,13 @@ fn weight(reason: &Reason) -> i32 {
         Reason::ExactName => 150,
         Reason::PrefixName => 80,
         Reason::SubstringName => 40,
+        Reason::BackendMatch => 5,
         Reason::BackendPriority(b) => match *b {
             "alpm" => 30,
             "aur" => 20,
             _ => 10,
         },
-        Reason::PreferredProvider => 60,
+        Reason::PreferredBackend => 60,
         Reason::PreviousPreference => 1000,
     }
 }
@@ -161,10 +164,10 @@ impl Resolver {
         reasons.push(Self::match_reason(query, &candidate));
         reasons.push(Reason::BackendPriority(candidate.source.as_str()));
         if let Some((pref_source, pref_ref)) = preference {
-            if candidate.backend_ref == pref_ref {
+            if candidate.source.as_str() == pref_source && candidate.backend_ref == pref_ref {
                 reasons.push(Reason::PreviousPreference);
             } else if candidate.source.as_str() == pref_source {
-                reasons.push(Reason::PreferredProvider);
+                reasons.push(Reason::PreferredBackend);
             }
         }
         let score: i32 = reasons.iter().map(weight).sum();
@@ -182,7 +185,10 @@ impl Resolver {
         if !query.is_empty() && candidate.name.starts_with(query) {
             return Reason::PrefixName;
         }
-        Reason::SubstringName
+        if !query.is_empty() && candidate.name.contains(query) {
+            return Reason::SubstringName;
+        }
+        Reason::BackendMatch
     }
 
     fn sort_ranked(ranked: &mut [RankedCandidate]) {
@@ -205,7 +211,8 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{InstalledPackage, TransactionPlan};
+    use crate::backend::ExecutionContext;
+    use crate::model::{Candidate, InstalledPackage, TransactionOperation, TransactionPlan};
 
     struct MockBackend {
         source: Source,
@@ -233,6 +240,13 @@ mod tests {
             Err("unused in tests".into())
         }
         fn plan_upgrade(&self, _target: &InstalledPackage) -> Result<TransactionPlan, String> {
+            Err("unused in tests".into())
+        }
+        fn execute_operation(
+            &self,
+            _op: &TransactionOperation,
+            _ctx: &ExecutionContext,
+        ) -> Result<(), String> {
             Err("unused in tests".into())
         }
     }
@@ -343,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn preferred_provider_ranks_without_history() {
+    fn previous_preference_and_preferred_backend() {
         let resolver = Resolver::new(vec![Box::new(MockBackend {
             source: Source::Alpm,
             name: "alpm",
@@ -353,7 +367,7 @@ mod tests {
             ResolutionDecision::Selected(winner) => {
                 assert!(winner.reasons.contains(&Reason::PreviousPreference));
             }
-            other => panic!("expected Best, got {other:?}"),
+            other => panic!("expected Selected, got {other:?}"),
         }
         let resolver = Resolver::new(vec![Box::new(MockBackend {
             source: Source::Alpm,
@@ -370,6 +384,44 @@ mod tests {
                     .reasons
                     .iter()
                     .any(|r| matches!(r, Reason::PreviousPreference)));
+            }
+            other => panic!("expected Selected, got {other:?}"),
+        }
+        let resolver = Resolver::new(vec![Box::new(MockBackend {
+            source: Source::Alpm,
+            name: "alpm",
+            results: Ok(vec![candidate(Source::Alpm, "extra", "firefox")]),
+        })]);
+        match resolver.resolve_with_preference("firefox", Some(("alpm", "extra/other-firefox"))) {
+            ResolutionDecision::Selected(winner) => {
+                assert_eq!(winner.candidate.name, "firefox");
+                assert!(winner
+                    .reasons
+                    .iter()
+                    .any(|r| matches!(r, Reason::PreferredBackend)));
+            }
+            other => panic!("expected Selected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_name_match_is_backend_match_not_substring() {
+        let resolver = Resolver::new(vec![Box::new(MockBackend {
+            source: Source::Aur,
+            name: "aur",
+            results: Ok(vec![Candidate {
+                source: Source::Aur,
+                provider: "aur".into(),
+                backend_ref: "aur/hiddify-bin".into(),
+                name: "hiddify-bin".into(),
+                version: None,
+                description: Some("proxy for hiddify".into()),
+            }]),
+        })]);
+        match resolver.resolve("hiddify proxy") {
+            ResolutionDecision::Selected(winner) => {
+                assert!(winner.reasons.contains(&Reason::BackendMatch));
+                assert!(!winner.reasons.contains(&Reason::SubstringName));
             }
             other => panic!("expected Selected, got {other:?}"),
         }
