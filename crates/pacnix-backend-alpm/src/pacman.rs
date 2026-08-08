@@ -67,7 +67,7 @@ impl PackageBackend for AlpmBackend {
             backend_ref: target.backend_ref.clone(),
             name: target.name.clone(),
             operations: vec![TransactionOperation::InstallPackage {
-                package: target.name.clone(),
+                package: target.backend_ref.clone(),
             }],
             requires_privilege: true,
         })
@@ -142,5 +142,27 @@ mod tests {
         assert_eq!(parsed[0].version.as_deref(), Some("122.0-1"));
         assert_eq!(parsed[0].backend_ref, "local/firefox");
         assert_eq!(parsed[1].name, "foo");
+    }
+
+    #[test]
+    fn install_plan_targets_repo_qualified_package() {
+        let backend = AlpmBackend;
+        let cand = Candidate {
+            source: Source::Alpm,
+            provider: "chaotic-aur".into(),
+            backend_ref: "chaotic-aur/foo-bin".into(),
+            name: "foo-bin".into(),
+            version: Some("1.2-3".into()),
+            description: None,
+        };
+        let plan = backend.plan_install(&cand).unwrap();
+        assert_eq!(plan.backend_ref, "chaotic-aur/foo-bin");
+        assert_eq!(
+            plan.operations,
+            vec![TransactionOperation::InstallPackage {
+                package: "chaotic-aur/foo-bin".into(),
+            }],
+            "install must pin the chosen repo, not let pacman pick by pacman.conf order"
+        );
     }
 }
