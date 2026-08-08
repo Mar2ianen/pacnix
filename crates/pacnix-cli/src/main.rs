@@ -6,8 +6,8 @@ use pacnix_backend_alpm::AlpmBackend;
 use pacnix_backend_aur::AurBackend;
 use pacnix_backend_nix::NixBackend;
 use pacnix_core::{
-    Candidate, Command, InstalledPackage, Interaction, PackageBackend, Resolver, Storage,
-    TargetSpec,
+    Candidate, Command, InstalledPackage, PackageBackend, RankedCandidate, ResolutionDecision,
+    Resolver, Storage, TargetSpec,
 };
 
 const VERBS: &[&str] = &[
@@ -98,19 +98,14 @@ fn main() {
 fn run(resolver: &Resolver, storage: &Storage, command: Command) {
     match command {
         Command::Search(query) => {
-            let result = resolver.resolve(&query);
-            for err in &result.backend_errors {
+            let (ranked, errors) = resolver.resolve_ranked(&query);
+            for err in &errors {
                 eprintln!("pacnix: {}: {}", err.backend, err.message);
             }
-            if result.candidates.is_empty() {
+            if ranked.is_empty() {
                 println!("nothing found for: {query}");
-                return;
-            }
-            for c in &result.candidates {
-                println!("{}/{}", c.provider, c.name);
-                if let Some(d) = &c.description {
-                    println!("    {d}");
-                }
+            } else {
+                print_ranked(&ranked);
             }
         }
         Command::ListInstalled => {
@@ -145,47 +140,55 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
         }
         Command::Install(targets) => {
             for target in &targets {
-                let result = resolver.resolve(&target.query);
-                for err in &result.backend_errors {
-                    eprintln!("pacnix: {}: {}", err.backend, err.message);
-                }
-                if result.candidates.is_empty() {
-                    eprintln!("pacnix: nothing found for: {}", target.query);
-                    continue;
-                }
-                if result.candidates.len() == 1 {
-                    let cand = &result.candidates[0];
-                    if let Err(e) = storage.remember_alias(
-                        &target.query,
-                        cand.source.as_str(),
-                        &cand.backend_ref,
-                    ) {
-                        eprintln!("pacnix: storage: {e}");
+                let preference = storage.alias(&target.query).ok().flatten();
+                let decision = resolver.resolve_with_preference(
+                    &target.query,
+                    preference.as_ref().map(|(s, r)| (s.as_str(), r.as_str())),
+                );
+                match decision {
+                    ResolutionDecision::Selected(ranked) => {
+                        let cand = &ranked.candidate;
+                        if let Err(e) = storage.remember_alias(
+                            &target.query,
+                            cand.source.as_str(),
+                            &cand.backend_ref,
+                        ) {
+                            eprintln!("pacnix: storage: {e}");
+                        }
+                        let backend = select_backend(resolver, cand);
+                        match backend.plan_install(cand) {
+                            Ok(plan) => {
+                                println!(
+                                    "plan: install {} from {}/{} ({} operations, privilege: {})",
+                                    plan.name,
+                                    cand.provider,
+                                    cand.name,
+                                    plan.operations.len(),
+                                    plan.requires_privilege
+                                );
+                            }
+                            Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
+                        }
                     }
-                    let backend = select_backend(resolver, cand);
-                    match backend.plan_install(cand) {
-                        Ok(plan) => {
+                    ResolutionDecision::Ambiguous(ranked) => {
+                        println!("select candidate for {}:", target.query);
+                        for (i, ranked) in ranked.iter().enumerate() {
+                            let cand = &ranked.candidate;
                             println!(
-                                "plan: install {} from {}/{} ({} operations, privilege: {})",
-                                plan.name,
+                                "  {}) {}/{}  [{}]",
+                                i + 1,
                                 cand.provider,
                                 cand.name,
-                                plan.operations.len(),
-                                plan.requires_privilege
+                                reasons(ranked)
                             );
                         }
-                        Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
                     }
-                    continue;
-                }
-                match Interaction::SelectCandidate(result.candidates) {
-                    Interaction::SelectCandidate(candidates) => {
-                        println!("select candidate for {}:", target.query);
-                        for (i, cand) in candidates.iter().enumerate() {
-                            println!("  {}) {}/{}", i + 1, cand.provider, cand.name);
+                    ResolutionDecision::NotFound { errors } => {
+                        for err in &errors {
+                            eprintln!("pacnix: {}: {}", err.backend, err.message);
                         }
+                        eprintln!("pacnix: nothing found for: {}", target.query);
                     }
-                    _ => unreachable!(),
                 }
             }
         }
@@ -269,4 +272,24 @@ fn select_backend<'a>(resolver: &'a Resolver, candidate: &Candidate) -> &'a dyn 
         .find(|b| b.source() == candidate.source)
         .expect("backend for candidate source must be registered")
         .as_ref()
+}
+
+fn reasons(ranked: &RankedCandidate) -> String {
+    ranked
+        .reasons
+        .iter()
+        .map(|r| r.label())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn print_ranked(ranked: &[RankedCandidate]) {
+    for (i, entry) in ranked.iter().enumerate() {
+        let cand = &entry.candidate;
+        println!("{}) {}/{}", i + 1, cand.provider, cand.name);
+        println!("    [{}]", reasons(entry));
+        if let Some(d) = &cand.description {
+            println!("    {d}");
+        }
+    }
 }

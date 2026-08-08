@@ -15,5 +15,5 @@ pub use model::{
     Candidate, InstallReceipt, InstalledPackage, Provenance, Source, TargetSpec,
     TransactionOperation, TransactionPlan,
 };
-pub use resolver::{BackendError, ResolutionResult, Resolver};
+pub use resolver::{BackendError, RankedCandidate, Reason, ResolutionDecision, Resolver};
 pub use storage::Storage;
