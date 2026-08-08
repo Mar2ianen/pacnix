@@ -27,7 +27,32 @@ fn try_download_snapshot(tarball: &std::path::Path, package: &str) -> Result<(),
         .into_body()
         .read_to_vec()
         .map_err(|e| format!("failed to read AUR snapshot: {e}"))?;
+    if bytes.len() < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b {
+        return Err(format!(
+            "AUR snapshot download failed: not a gzip archive ({} bytes)",
+            bytes.len()
+        ));
+    }
     std::fs::write(tarball, bytes).map_err(|e| e.to_string())
+}
+
+fn clone_snapshot(package: &str, dir: &std::path::Path) -> Result<(), String> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let status = std::process::Command::new("git")
+        .args(["clone", "--depth", "1", "--single-branch"])
+        .arg(format!("https://aur.archlinux.org/{package}.git"))
+        .arg(dir)
+        .status()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !status.success() {
+        return Err(format!("failed to clone AUR repository {package}"));
+    }
+    if !dir.join("PKGBUILD").exists() {
+        return Err(format!("AUR repository {package} has no PKGBUILD"));
+    }
+    Ok(())
 }
 
 fn fetch_snapshot(package: &str) -> Result<std::path::PathBuf, String> {
@@ -50,7 +75,10 @@ fn fetch_snapshot(package: &str) -> Result<std::path::PathBuf, String> {
         }
     }
     if !last_err.is_empty() {
-        return Err(format!("{last_err} (after 3 attempts)"));
+        match clone_snapshot(package, &dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) => return Err(format!("{last_err}; git clone fallback: {e}")),
+        }
     }
     let status = std::process::Command::new("tar")
         .arg("-xzf")
