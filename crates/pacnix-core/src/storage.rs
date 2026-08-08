@@ -295,7 +295,7 @@ impl Storage {
                    AND installed_backend = ?2
                    AND installed_backend_ref = ?3
                    AND version IS ?4
-                   AND installed_at = ?5
+                   AND (?5 IS NULL OR installed_at = ?5)
                  ORDER BY installed_at DESC LIMIT 1",
             )
             .map_err(|e| e.to_string())?;
@@ -562,11 +562,29 @@ mod tests {
                 .unwrap(),
             None
         );
+        let nixish = crate::InstallReceipt {
+            package_name: "bar".into(),
+            installed_backend: "nix".into(),
+            installed_backend_ref: "/nix/store/000-bar-2.0".into(),
+            source: "nixpkgs".into(),
+            source_ref: "nixpkgs#bar".into(),
+            version: Some("2.0".into()),
+            installed_at: 7,
+        };
+        storage.record_receipt(&nixish).unwrap();
         assert_eq!(
             storage
-                .known_source_for("bar", "alpm", "local/bar", None, None)
+                .known_source_for("bar", "nix", "/nix/store/000-bar-2.0", Some("2.0"), None)
                 .unwrap(),
-            None
+            Some("nixpkgs".into()),
+            "a backend without an incarnation token must still match"
+        );
+        assert_eq!(
+            storage
+                .known_source_for("bar", "nix", "/nix/store/000-bar-3.0", Some("3.0"), None)
+                .unwrap(),
+            None,
+            "version must still be checked when time is unknown"
         );
     }
 

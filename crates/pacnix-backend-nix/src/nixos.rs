@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
-use pacnix_core::model::{Candidate, InstalledPackage, Source, TransactionPlan};
+use std::process::Command;
+
+use pacnix_core::model::{
+    Candidate, InstalledPackage, Source, TransactionOperation, TransactionPlan,
+};
 use pacnix_core::PackageBackend;
+
+use crate::parsers;
+
+const NIX: &str = "nix";
+const EXPERIMENTAL: &str = "nix-command flakes";
 
 pub struct NixBackend;
 
@@ -14,26 +23,97 @@ impl PackageBackend for NixBackend {
         Source::Nix
     }
 
-    fn search(&self, _query: &str) -> Result<Vec<Candidate>, String> {
-        Err("pacnix-backend-nix: not implemented yet".into())
+    fn search(&self, query: &str) -> Result<Vec<Candidate>, String> {
+        let output = run_nix(&["search", "nixpkgs", query, "--json"])?;
+        Ok(parsers::parse_search(&output))
     }
 
     fn installed(&self) -> Result<Vec<InstalledPackage>, String> {
-        Err("pacnix-backend-nix: not implemented yet".into())
+        let output = run_nix(&["profile", "list", "--json"])?;
+        parsers::parse_profile_list(&output)
     }
 
-    fn plan_install(
-        &self,
-        _target: &pacnix_core::model::Candidate,
-    ) -> Result<TransactionPlan, String> {
-        Err("pacnix-backend-nix: not implemented yet".into())
+    fn plan_install(&self, target: &Candidate) -> Result<TransactionPlan, String> {
+        Ok(TransactionPlan {
+            backend_ref: format!("{}#{}", target.provider, target.name),
+            name: target.name.clone(),
+            operations: vec![TransactionOperation::ProfileInstall {
+                profile: "default".into(),
+                attr: format!("{}#{}", target.provider, target.name),
+            }],
+            requires_privilege: false,
+        })
     }
 
-    fn plan_remove(&self, _target: &InstalledPackage) -> Result<TransactionPlan, String> {
-        Err("pacnix-backend-nix: not implemented yet".into())
+    fn plan_remove(&self, target: &InstalledPackage) -> Result<TransactionPlan, String> {
+        Ok(TransactionPlan {
+            backend_ref: target.backend_ref.clone(),
+            name: target.name.clone(),
+            operations: vec![TransactionOperation::ProfileRemove {
+                profile: "default".into(),
+                attr: target.backend_ref.clone(),
+            }],
+            requires_privilege: false,
+        })
     }
 
     fn plan_upgrade(&self, _target: &InstalledPackage) -> Result<TransactionPlan, String> {
-        Err("pacnix-backend-nix: not implemented yet".into())
+        Ok(TransactionPlan {
+            backend_ref: "default".into(),
+            name: String::new(),
+            operations: vec![TransactionOperation::ProfileUpgrade {
+                profile: "default".into(),
+            }],
+            requires_privilege: false,
+        })
+    }
+}
+
+fn run_nix(args: &[&str]) -> Result<String, String> {
+    let output = Command::new(NIX)
+        .arg("--extra-experimental-features")
+        .arg(EXPERIMENTAL)
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run nix: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr_empty = stderr.is_empty();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stderr_empty && stdout.is_empty() {
+            return Ok(String::new());
+        }
+        if stderr.contains("no results") {
+            return Ok(String::new());
+        }
+        return Err(format!("nix {} failed: {stderr}", args.join(" ")));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plans_use_profile_operations() {
+        let backend = NixBackend;
+        let cand = Candidate {
+            source: Source::Nix,
+            provider: "nixpkgs".into(),
+            name: "ripgrep".into(),
+            version: Some("14.1.1".into()),
+            description: None,
+        };
+        let plan = backend.plan_install(&cand).unwrap();
+        assert_eq!(plan.backend_ref, "nixpkgs#ripgrep");
+        assert_eq!(
+            plan.operations,
+            vec![TransactionOperation::ProfileInstall {
+                profile: "default".into(),
+                attr: "nixpkgs#ripgrep".into(),
+            }]
+        );
+        assert!(!plan.requires_privilege);
     }
 }
