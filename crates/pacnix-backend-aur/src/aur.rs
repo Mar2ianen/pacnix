@@ -35,7 +35,7 @@ fn fetch_snapshot(package: &str) -> Result<std::path::PathBuf, String> {
         .map_err(|e| format!("failed to read AUR snapshot: {e}"))?;
     std::fs::write(&tarball, bytes).map_err(|e| e.to_string())?;
     let status = std::process::Command::new("tar")
-        .arg("-xzf")
+        .args(["-xzf", "--strip-components=1"])
         .arg(&tarball)
         .current_dir(&dir)
         .status()
