@@ -143,8 +143,11 @@ impl PackageBackend for AlpmBackend {
         Ok(parsers::parse_installed_size(&output))
     }
 
-    fn upgrade_impact_estimate(&self, _plan: &TransactionPlan) -> Result<UpgradeImpact, String> {
-        let output = run_pacman(&["-Su", "--print"])?;
+    fn upgrade_impact_estimate(
+        &self,
+        _plan: &TransactionPlan,
+    ) -> Result<Option<UpgradeImpact>, String> {
+        let output = run_pacman(&["-Su", "--print-format", "%r/%n"])?;
         let mut entries = Vec::new();
         for (repo, name) in parsers::parse_upgrade_candidates(&output) {
             let new_size = run_pacman(&["-Si", &format!("{repo}/{name}")])
@@ -161,7 +164,7 @@ impl PackageBackend for AlpmBackend {
                 new_size,
             });
         }
-        Ok(UpgradeImpact { entries })
+        Ok(Some(UpgradeImpact { entries }))
     }
 
     fn receipt_instances(

@@ -34,8 +34,11 @@ pub trait PackageBackend: Send + Sync {
     fn remove_size_estimate(&self, _target: &InstalledPackage) -> Result<Option<u64>, String> {
         Ok(None)
     }
-    fn upgrade_impact_estimate(&self, _plan: &TransactionPlan) -> Result<UpgradeImpact, String> {
-        Ok(UpgradeImpact::default())
+    fn upgrade_impact_estimate(
+        &self,
+        _plan: &TransactionPlan,
+    ) -> Result<Option<UpgradeImpact>, String> {
+        Ok(None)
     }
     fn execute_operation(
         &self,

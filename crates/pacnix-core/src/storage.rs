@@ -6,6 +6,8 @@ use crate::model::InstalledPackage;
 
 pub struct Storage {
     conn: Connection,
+    #[cfg(test)]
+    fail_upserts: std::sync::atomic::AtomicBool,
 }
 
 const SCHEMA_VERSION: i64 = 2;
@@ -50,7 +52,17 @@ impl Storage {
         )
         .map_err(|e| e.to_string())?;
         Self::migrate(&conn)?;
-        Ok(Self { conn })
+        #[cfg(test)]
+        {
+            Ok(Self {
+                conn,
+                fail_upserts: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+        #[cfg(not(test))]
+        {
+            Ok(Self { conn })
+        }
     }
 
     fn migrate(conn: &Connection) -> Result<(), String> {
@@ -195,7 +207,7 @@ impl Storage {
             .unwrap_or(0);
         for pkg in pkgs {
             #[cfg(test)]
-            if FORCE_UPSERT_FAILURE.load(std::sync::atomic::Ordering::SeqCst) {
+            if self.fail_upserts.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("forced upsert failure (test hook)".into());
             }
             tx.execute(
@@ -370,10 +382,6 @@ impl Storage {
         }
     }
 }
-
-#[cfg(test)]
-static FORCE_UPSERT_FAILURE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 fn provenance_str(provenance: &crate::model::Provenance) -> &'static str {
     match provenance {
@@ -588,14 +596,18 @@ mod tests {
             provenance: crate::Provenance::Foreign,
         };
         storage.upsert_instance_with_generation(&pkg, 1).unwrap();
-        FORCE_UPSERT_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
+        storage
+            .fail_upserts
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let doomed = InstalledPackage {
             name: "boom".into(),
             backend_ref: "local/boom".into(),
             ..pkg.clone()
         };
         let result = storage.upsert_and_sweep(&[doomed], 2, "alpm");
-        FORCE_UPSERT_FAILURE.store(false, std::sync::atomic::Ordering::SeqCst);
+        storage
+            .fail_upserts
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(result.is_err(), "upsert must fail");
         let kept: i64 = storage
             .conn

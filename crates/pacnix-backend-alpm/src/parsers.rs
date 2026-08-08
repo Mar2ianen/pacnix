@@ -18,8 +18,14 @@ pub fn parse_upgrade_candidates(output: &str) -> Vec<(String, String)> {
     output
         .lines()
         .filter_map(|line| {
-            let target = line.split_whitespace().next()?;
-            let (repo, name) = target.split_once('/')?;
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let (repo, name) = line.split_once('/')?;
+            if name.contains('/') || name.contains(' ') {
+                return None;
+            }
             Some((repo.to_string(), name.to_string()))
         })
         .collect()
@@ -123,7 +129,7 @@ mod tests {
 
     #[test]
     fn parses_upgrade_print_list() {
-        let out = "extra/blender 17:5.2.0-3 -> 17:5.2.0-4\nextra/ffmpeg 2:8.1-1 -> 2:8.2-2\n";
+        let out = "extra/blender\nextra/ffmpeg\n";
         let candidates = parse_upgrade_candidates(out);
         assert_eq!(
             candidates,
@@ -132,7 +138,11 @@ mod tests {
                 ("extra".to_string(), "ffmpeg".to_string()),
             ]
         );
-        assert!(parse_upgrade_candidates("no updates").is_empty());
+        assert!(parse_upgrade_candidates("").is_empty());
+        assert!(
+            parse_upgrade_candidates("https://mirror/extra/blender.pkg.tar.zst").is_empty(),
+            "url-style default %l output must not produce repo/name pairs"
+        );
     }
 
     #[test]

@@ -640,20 +640,22 @@ fn print_removal_summary(planned: &[PlannedRemoval]) {
 fn print_upgrade_summary(planned: &[PlannedUpgrade]) {
     println!("\n:: Packages to upgrade");
     let mut deltas: Vec<Option<i64>> = Vec::new();
+    let mut all_available = true;
     for item in planned {
         println!("  {} via {}", item.plan.name, item.backend.name());
         match item.backend.upgrade_impact_estimate(&item.plan) {
-            Ok(impact) if !impact.entries.is_empty() => {
+            Ok(Some(impact)) => {
                 for e in &impact.entries {
                     match (e.old_size, e.new_size) {
                         (Some(old), Some(new)) => {
                             let d = new as i64 - old as i64;
                             deltas.push(Some(d));
                             println!(
-                                "    {}: {} -> {} (Δ{} disk)",
+                                "    {}: {} -> {} (Δ{}{} disk)",
                                 e.name,
                                 human_size(old),
                                 human_size(new),
+                                if d > 0 { "+" } else { "" },
                                 human_size(d.unsigned_abs())
                             );
                         }
@@ -669,29 +671,39 @@ fn print_upgrade_summary(planned: &[PlannedUpgrade]) {
                     }
                 }
             }
-            Ok(_) => {}
-            Err(e) => eprintln!("pacnix: upgrade impact ({}): {e}", item.backend.name()),
+            Ok(None) => all_available = false,
+            Err(e) => {
+                all_available = false;
+                eprintln!("pacnix: upgrade impact ({}): {e}", item.backend.name());
+            }
         }
     }
-    if deltas.iter().all(Option::is_some) && !deltas.is_empty() {
-        let total: i64 = deltas.iter().flatten().sum();
-        println!(
-            "  Total: {} {} disk",
-            if total < 0 { "-" } else { "+" },
-            human_size(total.unsigned_abs())
-        );
-    } else if deltas.iter().any(Option::is_some) {
-        let total: i64 = deltas.iter().flatten().sum();
-        println!(
-            "  Known subtotal: {} {} disk",
-            if total < 0 { "-" } else { "+" },
-            human_size(total.unsigned_abs())
-        );
+    let any_known = deltas.iter().any(Option::is_some);
+    let all_delta_known = deltas.iter().all(Option::is_some) && !deltas.is_empty();
+    if let Some(total) = signed_total(&deltas) {
+        if all_available && all_delta_known {
+            println!(
+                "  Total: {}{} disk",
+                if total < 0 { "-" } else { "+" },
+                human_size(total.unsigned_abs())
+            );
+        } else if any_known {
+            println!(
+                "  Known subtotal: {}{} disk",
+                if total < 0 { "-" } else { "+" },
+                human_size(total.unsigned_abs())
+            );
+        }
     }
-    if deltas.iter().any(Option::is_some) {
-        println!("    (impact estimated from current sync DB; refresh may change it)");
+    if any_known {
+        println!("    note: impact estimated from current sync DB; refresh may change it");
     }
     println!();
+}
+
+fn signed_total(deltas: &[Option<i64>]) -> Option<i64> {
+    let known: Vec<i64> = deltas.iter().flatten().copied().collect();
+    (!known.is_empty()).then(|| known.iter().sum())
 }
 
 fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
