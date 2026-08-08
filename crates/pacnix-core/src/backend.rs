@@ -7,7 +7,7 @@ pub struct ExecutionContext {
     pub use_sudo: bool,
 }
 
-pub trait PackageBackend {
+pub trait PackageBackend: Send + Sync {
     fn name(&self) -> &'static str;
     fn source(&self) -> Source;
     fn search(&self, query: &str) -> Result<Vec<Candidate>, String>;

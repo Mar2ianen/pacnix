@@ -1,41 +1,67 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use pacnix_backend_alpm::AlpmBackend;
 use pacnix_backend_aur::AurBackend;
 use pacnix_backend_nix::NixBackend;
 use pacnix_core::{
-    Candidate, Command, Executor, InstalledPackage, PackageBackend, RankedCandidate,
-    ResolutionDecision, Resolver, Storage, TargetSpec, TransactionPlan,
+    BackendPlan, Candidate, Command, ExecutionBatch, ExecutionContext, Executor, InstalledPackage,
+    PackageBackend, RankedCandidate, ResolutionDecision, Resolver, Source, Storage, TargetSpec,
+    TransactionPlan,
 };
 
 const VERBS: &[&str] = &[
     "install", "remove", "search", "info", "list", "upgrade", "sync",
 ];
 
-fn parse(args: &[String]) -> Result<(Command, bool), String> {
-    let (execute, args): (bool, Vec<String>) = {
-        let rest: Vec<String> = args.to_vec();
-        let execute = rest.iter().any(|a| a == "--execute" || a == "-E");
-        let filtered = rest
-            .into_iter()
-            .filter(|a| a != "--execute" && a != "-E")
-            .collect();
-        (execute, filtered)
-    };
-    let first = args.first().ok_or("no command given")?;
+struct CliOptions {
+    dry_run: bool,
+    noconfirm: bool,
+}
+
+fn parse(args: &[String]) -> Result<(Command, CliOptions), String> {
+    let mut dry_run = false;
+    let mut noconfirm = false;
+    let mut deprecated = Vec::new();
+    let filtered: Vec<String> = args
+        .iter()
+        .filter(|a| match a.as_str() {
+            "--dry-run" => {
+                dry_run = true;
+                false
+            }
+            "--noconfirm" => {
+                noconfirm = true;
+                false
+            }
+            "--execute" | "-E" => {
+                deprecated.push((*a).clone());
+                false
+            }
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    if !deprecated.is_empty() {
+        eprintln!(
+            "pacnix: warning: {} is ignored: mutations run by default now",
+            deprecated.join(", ")
+        );
+    }
+    let first = filtered.first().ok_or("no command given")?;
     let command = match first.as_str() {
-        "-S" => Command::Install(to_targets(&args[1..])),
+        "-S" => Command::Install(to_targets(&filtered[1..])),
         "-Syu" => Command::Upgrade,
         "-Q" => Command::ListInstalled,
-        "-Ss" => Command::Search(args[1..].join(" ")),
+        "-Ss" => Command::Search(filtered[1..].join(" ")),
         "-Qi" => Command::Info(TargetSpec {
-            query: args[1..].join(" "),
+            query: filtered[1..].join(" "),
         }),
-        "-R" => Command::Remove(to_targets(&args[1..])),
+        "-R" => Command::Remove(to_targets(&filtered[1..])),
         verb if VERBS.contains(&verb) => {
-            let mut rest = args[1..].to_vec();
+            let mut rest = filtered[1..].to_vec();
             if let Some(pos) = rest.iter().position(|a| a == "--") {
                 rest = rest[pos + 1..].to_vec();
             }
@@ -57,7 +83,7 @@ fn parse(args: &[String]) -> Result<(Command, bool), String> {
         }
         other => return Err(format!("unknown command: {other}")),
     };
-    Ok((command, execute))
+    Ok((command, CliOptions { dry_run, noconfirm }))
 }
 
 fn to_targets(args: &[String]) -> Vec<TargetSpec> {
@@ -87,17 +113,16 @@ fn open_storage() -> Result<Storage, String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (command, execute) = match parse(&args) {
+    let (command, opts) = match parse(&args) {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("pacnix: {e}");
             std::process::exit(1);
         }
     };
-
     let resolver = Resolver::new(default_registry());
     match open_storage() {
-        Ok(storage) => run(&resolver, &storage, command, execute),
+        Ok(storage) => run(&resolver, &storage, command, &opts),
         Err(e) => {
             eprintln!("pacnix: storage: {e}");
             std::process::exit(1);
@@ -105,7 +130,7 @@ fn main() {
     }
 }
 
-fn run(resolver: &Resolver, storage: &Storage, command: Command, execute: bool) {
+fn run(resolver: &Resolver, storage: &Storage, command: Command, opts: &CliOptions) {
     match command {
         Command::Search(query) => {
             let (ranked, errors) = resolver.resolve_ranked(&query);
@@ -148,191 +173,13 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command, execute: bool) 
                 );
             }
         }
-        Command::Install(targets) => {
-            for target in &targets {
-                let preference = storage.alias(&target.query).ok().flatten();
-                let decision = resolver.resolve_with_preference(
-                    &target.query,
-                    preference.as_ref().map(|(s, r)| (s.as_str(), r.as_str())),
-                );
-                match decision {
-                    ResolutionDecision::Selected(ranked) => {
-                        let cand = &ranked.candidate;
-                        if let Err(e) = storage.remember_alias(
-                            &target.query,
-                            cand.source.as_str(),
-                            &cand.backend_ref,
-                        ) {
-                            eprintln!("pacnix: storage: {e}");
-                        }
-                        let backend = select_backend(resolver, cand);
-                        match backend.plan_install(cand) {
-                            Ok(plan) => {
-                                println!(
-                                    "plan: install {} from {}/{} ({} operations, privilege: {})",
-                                    plan.name,
-                                    cand.provider,
-                                    cand.name,
-                                    plan.operations.len(),
-                                    plan.requires_privilege
-                                );
-                                if execute {
-                                    execute_plan(storage, backend, &plan);
-                                }
-                            }
-                            Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
-                        }
-                    }
-                    ResolutionDecision::Ambiguous(ranked) => {
-                        println!("select candidate for {}:", target.query);
-                        for (i, ranked) in ranked.iter().enumerate() {
-                            let cand = &ranked.candidate;
-                            println!(
-                                "  {}) {}/{}  [{}]",
-                                i + 1,
-                                cand.provider,
-                                cand.name,
-                                reasons(ranked)
-                            );
-                        }
-                        if execute {
-                            eprintln!("pacnix: nothing executed: pick a candidate");
-                        }
-                    }
-                    ResolutionDecision::NotFound { errors } => {
-                        for err in &errors {
-                            eprintln!("pacnix: {}: {}", err.backend, err.message);
-                        }
-                        eprintln!("pacnix: nothing found for: {}", target.query);
-                    }
-                }
-            }
-        }
-        Command::Remove(targets) => {
-            for target in &targets {
-                let mut found = collect_installed(resolver);
-                found.retain(|p| p.name == target.query);
-                if found.is_empty() {
-                    eprintln!("pacnix: not installed: {}", target.query);
-                    continue;
-                }
-                if found.len() > 1 {
-                    eprintln!(
-                        "pacnix: {} has multiple installed instances ({})",
-                        target.query,
-                        found
-                            .iter()
-                            .map(|p| p.source.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    continue;
-                }
-                let pkg = &found[0];
-                let backend = select_backend_by_source(resolver, pkg.source.clone());
-                match backend.plan_remove(pkg) {
-                    Ok(plan) => {
-                        println!(
-                            "plan: remove {} via {} ({} operations)",
-                            plan.name,
-                            backend.name(),
-                            plan.operations.len()
-                        );
-                        if execute {
-                            execute_plan(storage, backend, &plan);
-                        }
-                    }
-                    Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
-                }
-            }
-        }
-        Command::Upgrade => {
-            let mut planned = 0;
-            for backend in resolver.backends() {
-                match backend.plan_upgrade_all() {
-                    Ok(plan) => {
-                        println!(
-                            "plan: upgrade {} -> {} ({} operations)",
-                            plan.name,
-                            backend.name(),
-                            plan.operations.len()
-                        );
-                        planned += 1;
-                        if execute {
-                            execute_plan(storage, backend.as_ref(), &plan);
-                        }
-                    }
-                    Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
-                }
-            }
-            if planned == 0 {
-                println!("nothing to upgrade");
-            }
-        }
+        Command::Install(targets) => run_install(resolver, storage, &targets, opts),
+        Command::Remove(targets) => run_remove(resolver, storage, &targets, opts),
+        Command::Upgrade => run_upgrade(resolver, storage, opts),
         Command::Sync => {
-            let generation = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            let mut count = 0;
-            let mut errors = Vec::new();
-            let mut scanned: Vec<String> = Vec::new();
-            for backend in resolver.backends() {
-                let pkgs = match backend.installed() {
-                    Ok(pkgs) => pkgs,
-                    Err(e) => {
-                        errors.push(format!("{}: {e}", backend.name()));
-                        continue;
-                    }
-                };
-                let mut backend_ok = true;
-                for pkg in &pkgs {
-                    let mut pkg = pkg.clone();
-                    if pkg.provenance == pacnix_core::Provenance::Foreign
-                        && pkg.installed_at.is_some()
-                    {
-                        if let Ok(Some(source)) = storage.known_source_for(
-                            &pkg.name,
-                            pkg.source.as_str(),
-                            &pkg.backend_ref,
-                            pkg.version.as_deref(),
-                            pkg.installed_at,
-                        ) {
-                            pkg.provenance = pacnix_core::Provenance::PacnixInstalled { source };
-                        }
-                    } else if pkg.provenance == pacnix_core::Provenance::Unknown
-                        && pkg.installed_at.is_none()
-                    {
-                        if let Ok(Some(source)) = storage.known_source_for(
-                            &pkg.name,
-                            pkg.source.as_str(),
-                            &pkg.backend_ref,
-                            pkg.version.as_deref(),
-                            None,
-                        ) {
-                            pkg.provenance = pacnix_core::Provenance::PacnixInstalled { source };
-                        }
-                    }
-                    if let Err(e) = storage.upsert_instance_with_generation(&pkg, generation) {
-                        backend_ok = false;
-                        errors.push(format!("{}: storage: {e}", backend.name()));
-                    }
-                }
-                if backend_ok {
-                    scanned.push(backend.name().to_string());
-                }
-                count += pkgs.len();
-            }
-            match storage.sweep_stale_instances(generation, &scanned) {
-                Ok(removed) => {
-                    if removed > 0 {
-                        println!("reconcile: removed {removed} stale instances");
-                    }
-                }
-                Err(e) => errors.push(format!("storage: {e}")),
-            }
-            for e in &errors {
-                eprintln!("pacnix: {e}");
+            let (count, removed) = reconcile(resolver, storage);
+            if removed > 0 {
+                println!("reconcile: removed {removed} stale instances");
             }
             println!("reconcile: {count} instances");
         }
@@ -342,14 +189,470 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command, execute: bool) 
     }
 }
 
+struct PlannedInstall<'a> {
+    query: String,
+    candidate: Candidate,
+    backend: &'a dyn PackageBackend,
+    plan: TransactionPlan,
+}
+
+fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], opts: &CliOptions) {
+    if targets.is_empty() {
+        eprintln!("pacnix: install requires at least one target");
+        return;
+    }
+    println!(":: Resolving...");
+    let mut planned: Vec<PlannedInstall> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for target in targets {
+        let preference = storage.alias(&target.query).ok().flatten();
+        let decision = resolver.resolve_with_preference(
+            &target.query,
+            preference.as_ref().map(|(s, r)| (s.as_str(), r.as_str())),
+        );
+        let ranked = match decision {
+            ResolutionDecision::Selected(ranked) => ranked,
+            ResolutionDecision::Ambiguous(ranked) => {
+                match select_candidate(&target.query, &ranked, opts) {
+                    Some(idx) => ranked[idx].clone(),
+                    None => {
+                        failed.push(format!("aborted selection for: {}", target.query));
+                        continue;
+                    }
+                }
+            }
+            ResolutionDecision::NotFound { errors } => {
+                for err in &errors {
+                    eprintln!("pacnix: {}: {}", err.backend, err.message);
+                }
+                failed.push(format!("nothing found for: {}", target.query));
+                continue;
+            }
+        };
+        println!(
+            ":: Selected {}/{}",
+            ranked.candidate.provider, ranked.candidate.name
+        );
+        let backend = select_backend(resolver, &ranked.candidate);
+        match backend.plan_install(&ranked.candidate) {
+            Ok(plan) => planned.push(PlannedInstall {
+                query: target.query.clone(),
+                candidate: ranked.candidate.clone(),
+                backend,
+                plan,
+            }),
+            Err(e) => failed.push(format!("{}: {e}", backend.name())),
+        }
+    }
+    if !failed.is_empty() {
+        for f in &failed {
+            eprintln!("pacnix: {f}");
+        }
+        eprintln!("pacnix: aborting: resolution failed");
+        return;
+    }
+    print_install_summary(&planned);
+    if opts.dry_run {
+        println!(":: (dry run: nothing executed, nothing written)");
+        return;
+    }
+    if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege() {
+        return;
+    }
+    if !confirm(opts, ":: Proceed with installation? [Y/n]") {
+        eprintln!("pacnix: aborted");
+        return;
+    }
+    let reports = {
+        let batch = ExecutionBatch {
+            plans: planned
+                .iter()
+                .map(|p| BackendPlan {
+                    backend: p.backend,
+                    plan: &p.plan,
+                    ctx: ExecutionContext {
+                        use_sudo: p.plan.requires_privilege,
+                    },
+                })
+                .collect(),
+        };
+        Executor::new(storage).execute_batch(&batch)
+    };
+    report_outcomes(&reports);
+    let mut ok = true;
+    for (report, item) in reports.iter().zip(planned.iter()) {
+        if report.error.is_none() {
+            if let Err(e) = storage.remember_alias(
+                &item.query,
+                item.candidate.source.as_str(),
+                &item.candidate.backend_ref,
+            ) {
+                eprintln!("pacnix: storage: {e}");
+            }
+        } else {
+            ok = false;
+        }
+    }
+    if ok {
+        let (_count, removed) = reconcile(resolver, storage);
+        if removed > 0 {
+            println!(":: Reconciled authoritative state (removed {removed} stale instances)");
+        } else {
+            println!(":: Reconciled authoritative state");
+        }
+    } else {
+        println!(":: partial failure: some lanes failed; run `pacnix sync` to reconcile");
+    }
+}
+
+struct PlannedRemoval<'a> {
+    pkg: InstalledPackage,
+    backend: &'a dyn PackageBackend,
+    plan: TransactionPlan,
+}
+
+fn run_remove(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], opts: &CliOptions) {
+    if targets.is_empty() {
+        eprintln!("pacnix: remove requires at least one target");
+        return;
+    }
+    let all_installed = collect_installed(resolver);
+    let mut planned: Vec<PlannedRemoval> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for target in targets {
+        let found: Vec<&InstalledPackage> = all_installed
+            .iter()
+            .filter(|p| p.name == target.query)
+            .collect();
+        if found.is_empty() {
+            failed.push(format!("not installed: {}", target.query));
+            continue;
+        }
+        let pkg = if found.len() > 1 && !opts.noconfirm && std::io::stdin().is_terminal() {
+            match select_instance(&target.query, &found) {
+                Some(p) => p,
+                None => {
+                    failed.push(format!("cannot select instance for: {}", target.query));
+                    continue;
+                }
+            }
+        } else {
+            found[0].clone()
+        };
+        let backend = select_backend_by_source(resolver, pkg.source.clone());
+        match backend.plan_remove(&pkg) {
+            Ok(plan) => planned.push(PlannedRemoval { pkg, backend, plan }),
+            Err(e) => failed.push(format!("{}: {e}", backend.name())),
+        }
+    }
+    if !failed.is_empty() {
+        for f in &failed {
+            eprintln!("pacnix: {f}");
+        }
+        eprintln!("pacnix: aborting");
+        return;
+    }
+    print_removal_summary(&planned);
+    if opts.dry_run {
+        println!(":: (dry run: nothing executed, nothing written)");
+        return;
+    }
+    if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege() {
+        return;
+    }
+    if !confirm(opts, ":: Proceed with removal? [Y/n]") {
+        eprintln!("pacnix: aborted");
+        return;
+    }
+    let reports = execute_plans(
+        storage,
+        &planned
+            .iter()
+            .map(|p| (p.backend, &p.plan))
+            .collect::<Vec<_>>(),
+    );
+    report_outcomes(&reports);
+    if reports.iter().all(|r| r.error.is_none()) {
+        let (_count, removed) = reconcile(resolver, storage);
+        if removed > 0 {
+            println!(":: Reconciled authoritative state (removed {removed} stale instances)");
+        } else {
+            println!(":: Reconciled authoritative state");
+        }
+    } else {
+        println!(":: partial failure; run `pacnix sync` to reconcile");
+    }
+}
+
+struct PlannedUpgrade<'a> {
+    backend: &'a dyn PackageBackend,
+    plan: TransactionPlan,
+}
+
+fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
+    println!(":: Checking for updates...");
+    let mut planned: Vec<PlannedUpgrade> = Vec::new();
+    for backend in resolver.backends() {
+        match backend.plan_upgrade_all() {
+            Ok(plan) => planned.push(PlannedUpgrade {
+                backend: backend.as_ref(),
+                plan,
+            }),
+            Err(e) => eprintln!("pacnix: {}: {}", backend.name(), e),
+        }
+    }
+    if planned.is_empty() {
+        println!("nothing to upgrade");
+        return;
+    }
+    print_upgrade_summary(&planned);
+    if opts.dry_run {
+        println!(":: (dry run: nothing executed, nothing written)");
+        return;
+    }
+    if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege() {
+        return;
+    }
+    if !confirm(opts, ":: Proceed with upgrade? [Y/n]") {
+        eprintln!("pacnix: aborted");
+        return;
+    }
+    let pairs: Vec<(&dyn PackageBackend, &TransactionPlan)> =
+        planned.iter().map(|p| (p.backend, &p.plan)).collect();
+    let reports = execute_plans(storage, &pairs);
+    report_outcomes(&reports);
+    reconcile(resolver, storage);
+    println!(":: Reconciled authoritative state");
+}
+
+fn execute_plans(
+    storage: &Storage,
+    pairs: &[(&dyn PackageBackend, &TransactionPlan)],
+) -> Vec<pacnix_core::BackendReport> {
+    let batch = ExecutionBatch {
+        plans: pairs
+            .iter()
+            .map(|(backend, plan)| BackendPlan {
+                backend: *backend,
+                plan,
+                ctx: ExecutionContext {
+                    use_sudo: plan.requires_privilege,
+                },
+            })
+            .collect(),
+    };
+    Executor::new(storage).execute_batch(&batch)
+}
+
+fn report_outcomes(reports: &[pacnix_core::BackendReport]) {
+    for report in reports {
+        if let Some(e) = &report.error {
+            eprintln!("pacnix: {}: {}", report.backend, e);
+            continue;
+        }
+        for receipt in &report.receipts {
+            println!(
+                "receipt: {} from {} ({})",
+                receipt.package_name, receipt.source_ref, receipt.installed_backend_ref
+            );
+        }
+    }
+}
+
+fn acquire_privilege() -> bool {
+    println!(":: Acquiring privilege...");
+    match std::process::Command::new("sudo").arg("-v").status() {
+        Ok(s) if s.success() => true,
+        Ok(_) => {
+            eprintln!("pacnix: privilege acquisition failed");
+            false
+        }
+        Err(e) => {
+            eprintln!("pacnix: sudo unavailable: {e}");
+            false
+        }
+    }
+}
+
+fn confirm(opts: &CliOptions, prompt: &str) -> bool {
+    if opts.noconfirm {
+        return true;
+    }
+    if !std::io::stdin().is_terminal() {
+        eprintln!("pacnix: stdin is not a terminal; use --noconfirm to proceed");
+        return false;
+    }
+    print!("{prompt} ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) => false,
+        Ok(_) => matches!(line.trim().to_lowercase().as_str(), "" | "y" | "yes"),
+        Err(_) => false,
+    }
+}
+
+fn select_candidate(query: &str, ranked: &[RankedCandidate], opts: &CliOptions) -> Option<usize> {
+    if ranked.is_empty() {
+        return None;
+    }
+    if opts.noconfirm || !std::io::stdin().is_terminal() {
+        return Some(0);
+    }
+    println!(":: Multiple providers found for {query}:");
+    for (i, entry) in ranked.iter().enumerate() {
+        let cand = &entry.candidate;
+        println!("{}) {}/{}", i + 1, cand.provider, cand.name);
+        println!("   [{}]", reasons(entry));
+        if let Some(d) = &cand.description {
+            println!("   {d}");
+        }
+    }
+    print!("Enter a selection (default=1): ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return Some(0);
+    }
+    let choice = line.trim();
+    if choice.is_empty() {
+        return Some(0);
+    }
+    choice
+        .parse::<usize>()
+        .ok()
+        .map(|n| n - 1)
+        .filter(|n| *n < ranked.len())
+}
+
+fn select_instance(query: &str, found: &[&InstalledPackage]) -> Option<InstalledPackage> {
+    println!(":: Multiple installed instances for {query}:");
+    for (i, p) in found.iter().enumerate() {
+        println!("   {}) {}  {}", i + 1, p.source.as_str(), p.backend_ref);
+    }
+    print!("Enter a selection (default=1): ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return Some(found[0].clone());
+    }
+    let choice = line.trim();
+    if choice.is_empty() {
+        return Some(found[0].clone());
+    }
+    choice
+        .parse::<usize>()
+        .ok()
+        .map(|n| n - 1)
+        .filter(|n| *n < found.len())
+        .map(|n| found[n].clone())
+}
+
+fn print_install_summary(planned: &[PlannedInstall]) {
+    println!("\n:: Packages to install");
+    let mut by_backend: Vec<(String, Vec<&PlannedInstall>)> = Vec::new();
+    for item in planned {
+        let key = item.backend.name().to_uppercase();
+        match by_backend.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, list)) => list.push(item),
+            None => by_backend.push((key, vec![item])),
+        }
+    }
+    for (backend, items) in &by_backend {
+        println!("{backend} ({})", items.len());
+        for item in items {
+            println!("  {}/{}", item.candidate.provider, item.candidate.name);
+        }
+    }
+    println!();
+}
+
+fn print_removal_summary(planned: &[PlannedRemoval]) {
+    println!("\n:: Packages to remove");
+    for item in planned {
+        println!("  {} via {}", item.pkg.name, item.backend.name());
+    }
+    println!();
+}
+
+fn print_upgrade_summary(planned: &[PlannedUpgrade]) {
+    println!("\n:: Packages to upgrade");
+    for item in planned {
+        println!("  {} via {}", item.plan.name, item.backend.name());
+    }
+    println!();
+}
+
+fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
+    let generation = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut count = 0;
+    let mut errors = Vec::new();
+    let mut scanned: Vec<String> = Vec::new();
+    for backend in resolver.backends() {
+        let pkgs = match backend.installed() {
+            Ok(pkgs) => pkgs,
+            Err(e) => {
+                errors.push(format!("{}: {e}", backend.name()));
+                continue;
+            }
+        };
+        let mut backend_ok = true;
+        for pkg in &pkgs {
+            let mut pkg = pkg.clone();
+            if pkg.provenance == pacnix_core::Provenance::Foreign && pkg.installed_at.is_some() {
+                if let Ok(Some(source)) = storage.known_source_for(
+                    &pkg.name,
+                    pkg.source.as_str(),
+                    &pkg.backend_ref,
+                    pkg.version.as_deref(),
+                    pkg.installed_at,
+                ) {
+                    pkg.provenance = pacnix_core::Provenance::PacnixInstalled { source };
+                }
+            } else if pkg.provenance == pacnix_core::Provenance::Unknown
+                && pkg.installed_at.is_none()
+            {
+                if let Ok(Some(source)) = storage.known_source_for(
+                    &pkg.name,
+                    pkg.source.as_str(),
+                    &pkg.backend_ref,
+                    pkg.version.as_deref(),
+                    None,
+                ) {
+                    pkg.provenance = pacnix_core::Provenance::PacnixInstalled { source };
+                }
+            }
+            if let Err(e) = storage.upsert_instance_with_generation(&pkg, generation) {
+                backend_ok = false;
+                errors.push(format!("{}: storage: {e}", backend.name()));
+            }
+        }
+        if backend_ok {
+            scanned.push(backend.name().to_string());
+        }
+        count += pkgs.len();
+    }
+    let removed = match storage.sweep_stale_instances(generation, &scanned) {
+        Ok(removed) => removed,
+        Err(e) => {
+            errors.push(format!("storage: {e}"));
+            0
+        }
+    };
+    for e in &errors {
+        eprintln!("pacnix: {e}");
+    }
+    (count, removed)
+}
+
 fn select_backend<'a>(resolver: &'a Resolver, candidate: &Candidate) -> &'a dyn PackageBackend {
     select_backend_by_source(resolver, candidate.source.clone())
 }
 
-fn select_backend_by_source(
-    resolver: &Resolver,
-    source: pacnix_core::Source,
-) -> &dyn PackageBackend {
+fn select_backend_by_source(resolver: &Resolver, source: Source) -> &dyn PackageBackend {
     resolver
         .backends()
         .iter()
@@ -367,24 +670,6 @@ fn collect_installed(resolver: &Resolver) -> Vec<InstalledPackage> {
         }
     }
     found
-}
-
-fn execute_plan(storage: &Storage, backend: &dyn PackageBackend, plan: &TransactionPlan) {
-    let ctx = pacnix_core::ExecutionContext {
-        use_sudo: plan.requires_privilege,
-    };
-    match Executor::new(storage).execute(plan, backend, &ctx) {
-        Ok(receipts) => {
-            println!("exec: {} ok", plan.name);
-            for receipt in &receipts {
-                println!(
-                    "receipt: {} from {} ({})",
-                    receipt.package_name, receipt.source_ref, receipt.installed_backend_ref
-                );
-            }
-        }
-        Err(e) => eprintln!("pacnix: {e}"),
-    }
 }
 
 fn reasons(ranked: &RankedCandidate) -> String {

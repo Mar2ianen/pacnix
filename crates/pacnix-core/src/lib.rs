@@ -11,7 +11,7 @@ pub mod storage;
 
 pub use backend::{ExecutionContext, PackageBackend};
 pub use command::Command;
-pub use executor::Executor;
+pub use executor::{BackendPlan, BackendReport, ExecutionBatch, Executor};
 pub use interaction::{Interaction, PrivilegeProvider, PrivilegedOperation};
 pub use model::{
     Candidate, InstallReceipt, InstalledPackage, Provenance, Source, TargetSpec,
