@@ -85,4 +85,5 @@ pub enum TransactionOperation {
     ProfileInstall { profile: String, attr: String },
     ProfileRemove { profile: String, attr: String },
     ProfileUpgrade { profile: String, element: String },
+    SystemUpgrade { system: String },
 }

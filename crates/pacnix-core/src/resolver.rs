@@ -242,11 +242,22 @@ mod tests {
         fn plan_upgrade(&self, _target: &InstalledPackage) -> Result<TransactionPlan, String> {
             Err("unused in tests".into())
         }
+        fn plan_upgrade_all(&self) -> Result<TransactionPlan, String> {
+            Err("unused in tests".into())
+        }
         fn execute_operation(
             &self,
             _op: &TransactionOperation,
             _ctx: &ExecutionContext,
         ) -> Result<(), String> {
+            Err("unused in tests".into())
+        }
+        fn receipt_instances(
+            &self,
+            _plan: &TransactionPlan,
+            _before: &[InstalledPackage],
+            _after: &[InstalledPackage],
+        ) -> Result<Vec<InstalledPackage>, String> {
             Err("unused in tests".into())
         }
     }

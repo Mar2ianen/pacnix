@@ -11,3 +11,7 @@ pacnix-core = { path = "../pacnix-core" }
 pacnix-backend-alpm = { path = "../pacnix-backend-alpm" }
 pacnix-backend-aur = { path = "../pacnix-backend-aur" }
 pacnix-backend-nix = { path = "../pacnix-backend-nix" }
+
+[[bin]]
+name = "pacnix"
+path = "src/main.rs"

@@ -94,6 +94,19 @@ impl PackageBackend for AurBackend {
         })
     }
 
+    fn plan_upgrade_all(&self) -> Result<TransactionPlan, String> {
+        Err("aur: upgrade all not implemented yet".into())
+    }
+
+    fn receipt_instances(
+        &self,
+        _plan: &TransactionPlan,
+        _before: &[InstalledPackage],
+        _after: &[InstalledPackage],
+    ) -> Result<Vec<InstalledPackage>, String> {
+        Err("aur: receipt attribution not implemented yet".into())
+    }
+
     fn execute_operation(
         &self,
         op: &TransactionOperation,

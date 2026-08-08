@@ -247,11 +247,9 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command, execute: bool) 
             }
         }
         Command::Upgrade => {
-            let installed = collect_installed(resolver);
             let mut planned = 0;
-            for pkg in &installed {
-                let backend = select_backend_by_source(resolver, pkg.source.clone());
-                match backend.plan_upgrade(pkg) {
+            for backend in resolver.backends() {
+                match backend.plan_upgrade_all() {
                     Ok(plan) => {
                         println!(
                             "plan: upgrade {} -> {} ({} operations)",
@@ -261,7 +259,7 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command, execute: bool) 
                         );
                         planned += 1;
                         if execute {
-                            execute_plan(storage, backend, &plan);
+                            execute_plan(storage, backend.as_ref(), &plan);
                         }
                     }
                     Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),

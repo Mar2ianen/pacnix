@@ -69,6 +69,32 @@ impl PackageBackend for NixBackend {
         })
     }
 
+    fn plan_upgrade_all(&self) -> Result<TransactionPlan, String> {
+        Ok(TransactionPlan {
+            backend_ref: "system".into(),
+            name: "nix profile upgrade".into(),
+            operations: vec![TransactionOperation::SystemUpgrade {
+                system: "nix".into(),
+            }],
+            requires_privilege: false,
+        })
+    }
+
+    fn receipt_instances(
+        &self,
+        _plan: &TransactionPlan,
+        before: &[InstalledPackage],
+        after: &[InstalledPackage],
+    ) -> Result<Vec<InstalledPackage>, String> {
+        let before_names: std::collections::HashSet<&str> =
+            before.iter().map(|p| p.name.as_str()).collect();
+        Ok(after
+            .iter()
+            .filter(|p| !before_names.contains(p.name.as_str()))
+            .cloned()
+            .collect())
+    }
+
     fn execute_operation(
         &self,
         op: &TransactionOperation,
@@ -79,19 +105,22 @@ impl PackageBackend for NixBackend {
                 let mut args = vec!["profile", "install"];
                 profile_args(&mut args, profile);
                 args.push(attr);
-                run_nix(&args).map(|_| ())
+                run_nix_mutating(&args)
             }
             TransactionOperation::ProfileRemove { profile, attr } => {
                 let mut args = vec!["profile", "remove"];
                 profile_args(&mut args, profile);
                 args.push(attr);
-                run_nix(&args).map(|_| ())
+                run_nix_mutating(&args)
             }
             TransactionOperation::ProfileUpgrade { profile, element } => {
                 let mut args = vec!["profile", "upgrade"];
                 profile_args(&mut args, profile);
                 args.push(element);
-                run_nix(&args).map(|_| ())
+                run_nix_mutating(&args)
+            }
+            TransactionOperation::SystemUpgrade { system } if system == "nix" => {
+                run_nix_mutating(&["profile", "upgrade"])
             }
             _ => Err(format!("nix: unsupported operation {op:?}")),
         }
@@ -125,6 +154,20 @@ fn run_nix(args: &[&str]) -> Result<String, String> {
         return Err(format!("nix {} failed: {stderr}", args.join(" ")));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_nix_mutating(args: &[&str]) -> Result<(), String> {
+    let output = Command::new(NIX)
+        .arg("--extra-experimental-features")
+        .arg(EXPERIMENTAL)
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run nix: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("nix {} failed: {stderr}", args.join(" ")));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -95,6 +95,30 @@ impl PackageBackend for AlpmBackend {
         })
     }
 
+    fn plan_upgrade_all(&self) -> Result<TransactionPlan, String> {
+        Ok(TransactionPlan {
+            backend_ref: "system".into(),
+            name: "alpm system upgrade".into(),
+            operations: vec![TransactionOperation::SystemUpgrade {
+                system: "pacman".into(),
+            }],
+            requires_privilege: true,
+        })
+    }
+
+    fn receipt_instances(
+        &self,
+        plan: &TransactionPlan,
+        _before: &[InstalledPackage],
+        after: &[InstalledPackage],
+    ) -> Result<Vec<InstalledPackage>, String> {
+        Ok(after
+            .iter()
+            .filter(|p| p.name == plan.name)
+            .cloned()
+            .collect())
+    }
+
     fn execute_operation(
         &self,
         op: &TransactionOperation,
@@ -109,6 +133,9 @@ impl PackageBackend for AlpmBackend {
             }
             TransactionOperation::UpgradePackage { package } => {
                 run_pacman_elevated(ctx, &["-S", "--noconfirm", "--needed", package])
+            }
+            TransactionOperation::SystemUpgrade { system } if system == "pacman" => {
+                run_pacman_elevated(ctx, &["-Syu", "--noconfirm"])
             }
             _ => Err(format!("alpm: unsupported operation {op:?}")),
         }
@@ -178,6 +205,45 @@ mod tests {
         assert_eq!(parsed[0].version.as_deref(), Some("122.0-1"));
         assert_eq!(parsed[0].backend_ref, "local/firefox");
         assert_eq!(parsed[1].name, "foo");
+    }
+
+    #[test]
+    fn receipt_instances_exclude_dependencies() {
+        let backend = AlpmBackend;
+        let plan = TransactionPlan {
+            backend_ref: "extra/foo".into(),
+            name: "foo".into(),
+            operations: vec![TransactionOperation::InstallPackage {
+                package: "extra/foo".into(),
+            }],
+            requires_privilege: true,
+        };
+        let pkg = |name: &str| InstalledPackage {
+            source: Source::Alpm,
+            backend_ref: format!("local/{name}"),
+            name: name.into(),
+            version: Some("1.0-1".into()),
+            scope: None,
+            installed_at: None,
+            provenance: pacnix_core::Provenance::SyncKnown,
+        };
+        let after = vec![pkg("foo"), pkg("libfoo")];
+        let receipts = backend.receipt_instances(&plan, &[], &after).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].name, "foo");
+    }
+
+    #[test]
+    fn upgrade_all_is_single_system_upgrade() {
+        let backend = AlpmBackend;
+        let plan = backend.plan_upgrade_all().unwrap();
+        assert_eq!(
+            plan.operations,
+            vec![TransactionOperation::SystemUpgrade {
+                system: "pacman".into(),
+            }]
+        );
+        assert!(plan.requires_privilege);
     }
 
     #[test]

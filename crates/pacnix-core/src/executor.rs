@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
-use std::collections::HashMap;
-
 use crate::backend::{ExecutionContext, PackageBackend};
-use crate::model::{InstallReceipt, InstalledPackage, TransactionPlan};
+use crate::model::{InstallReceipt, TransactionPlan};
 use crate::Storage;
 
 pub struct Executor<'a> {
@@ -21,7 +19,7 @@ impl<'a> Executor<'a> {
         backend: &dyn PackageBackend,
         ctx: &ExecutionContext,
     ) -> Result<Vec<InstallReceipt>, String> {
-        let before = self.snapshot(backend.installed()?);
+        let before = backend.installed()?;
         for op in &plan.operations {
             backend
                 .execute_operation(op, ctx)
@@ -29,41 +27,21 @@ impl<'a> Executor<'a> {
         }
         let after = backend.installed()?;
         let mut receipts = Vec::new();
-        for pkg in after {
-            if !before.contains_key(&instance_key(&pkg)) {
-                let receipt = InstallReceipt {
-                    package_name: pkg.name.clone(),
-                    installed_backend: pkg.source.as_str().to_string(),
-                    installed_backend_ref: pkg.backend_ref.clone(),
-                    source: pkg.source.as_str().to_string(),
-                    source_ref: plan.backend_ref.clone(),
-                    version: pkg.version.clone(),
-                    installed_at: pkg.installed_at.unwrap_or_else(now),
-                };
-                self.storage.record_receipt(&receipt)?;
-                receipts.push(receipt);
-            }
+        for pkg in backend.receipt_instances(plan, &before, &after)? {
+            let receipt = InstallReceipt {
+                package_name: pkg.name.clone(),
+                installed_backend: pkg.source.as_str().to_string(),
+                installed_backend_ref: pkg.backend_ref.clone(),
+                source: pkg.source.as_str().to_string(),
+                source_ref: plan.backend_ref.clone(),
+                version: pkg.version.clone(),
+                installed_at: pkg.installed_at.unwrap_or_else(now),
+            };
+            self.storage.record_receipt(&receipt)?;
+            receipts.push(receipt);
         }
         Ok(receipts)
     }
-
-    fn snapshot(
-        &self,
-        installed: Vec<InstalledPackage>,
-    ) -> HashMap<(String, String, Option<i64>), ()> {
-        installed
-            .into_iter()
-            .map(|p| (instance_key(&p), ()))
-            .collect()
-    }
-}
-
-fn instance_key(pkg: &InstalledPackage) -> (String, String, Option<i64>) {
-    (
-        pkg.backend_ref.clone(),
-        pkg.version.clone().unwrap_or_default(),
-        pkg.installed_at,
-    )
 }
 
 fn now() -> i64 {
@@ -78,7 +56,7 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
-    use crate::model::{Candidate, Source, TransactionOperation};
+    use crate::model::{Candidate, InstalledPackage, Source, TransactionOperation};
 
     struct ScriptBackend {
         store: RefCell<Vec<InstalledPackage>>,
@@ -106,6 +84,9 @@ mod tests {
         fn plan_upgrade(&self, _target: &InstalledPackage) -> Result<TransactionPlan, String> {
             Err("unused in executor tests".into())
         }
+        fn plan_upgrade_all(&self) -> Result<TransactionPlan, String> {
+            Err("unused in executor tests".into())
+        }
         fn execute_operation(
             &self,
             op: &TransactionOperation,
@@ -126,6 +107,18 @@ mod tests {
                 }
                 _ => Err("scripted failure".into()),
             }
+        }
+        fn receipt_instances(
+            &self,
+            plan: &TransactionPlan,
+            _before: &[InstalledPackage],
+            after: &[InstalledPackage],
+        ) -> Result<Vec<InstalledPackage>, String> {
+            Ok(after
+                .iter()
+                .filter(|p| p.name == plan.name)
+                .cloned()
+                .collect())
         }
     }
 
