@@ -14,7 +14,7 @@ impl Storage {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS packages (
                 id             INTEGER PRIMARY KEY,
-                canonical_name TEXT NOT NULL
+                canonical_name TEXT NOT NULL UNIQUE
              );
              CREATE TABLE IF NOT EXISTS installed_instances (
                 id             INTEGER PRIMARY KEY,
@@ -115,5 +115,58 @@ impl InstalledPackage {
             crate::Source::Aur => "aur",
             crate::Source::Nix => "nix",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::InstalledPackage;
+    use crate::Source;
+
+    fn tmp_db() -> Storage {
+        let path = format!(
+            "/tmp/pacnix-test-{}.db",
+            std::process::id()
+        );
+        let _ = std::fs::remove_file(&path);
+        Storage::open(&path).unwrap()
+    }
+
+    #[test]
+    fn upsert_instance_is_idempotent() {
+        let storage = tmp_db();
+        let pkg = InstalledPackage {
+            source: Source::Alpm,
+            backend_ref: "extra/firefox".into(),
+            name: "firefox".into(),
+            version: Some("1.0-1".into()),
+            scope: None,
+            installed_at: Some(1),
+        };
+        storage.upsert_instance(&pkg).unwrap();
+        let updated = InstalledPackage {
+            version: Some("2.0-1".into()),
+            ..pkg.clone()
+        };
+        storage.upsert_instance(&updated).unwrap();
+
+        let conn = &storage.conn;
+        let packages: i64 = conn
+            .query_row("SELECT COUNT(*) FROM packages", [], |r| r.get(0))
+            .unwrap();
+        let instances: i64 = conn
+            .query_row("SELECT COUNT(*) FROM installed_instances", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(packages, 1, "logical package must not be duplicated");
+        assert_eq!(instances, 1, "instance must be updated, not duplicated");
+        let version: String = conn
+            .query_row(
+                "SELECT version FROM installed_instances WHERE backend = 'alpm' AND backend_ref = 'extra/firefox'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "2.0-1");
     }
 }

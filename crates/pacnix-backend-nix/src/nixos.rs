@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
-use pacnix_core::model::{Candidate, InstalledPackage, Source, TargetSpec, TransactionPlan};
+use pacnix_core::model::{Candidate, InstalledPackage, Source, TransactionPlan};
 use pacnix_core::PackageBackend;
 
 pub struct NixBackend;
@@ -22,7 +22,7 @@ impl PackageBackend for NixBackend {
         Err("pacnix-backend-nix: not implemented yet".into())
     }
 
-    fn plan_install(&self, _target: &TargetSpec) -> Result<TransactionPlan, String> {
+    fn plan_install(&self, _target: &pacnix_core::model::Candidate) -> Result<TransactionPlan, String> {
         Err("pacnix-backend-nix: not implemented yet".into())
     }
 

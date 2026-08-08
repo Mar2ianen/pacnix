@@ -11,5 +11,5 @@ pub use backend::PackageBackend;
 pub use command::Command;
 pub use interaction::{Interaction, PrivilegeProvider, PrivilegedOperation};
 pub use model::{Candidate, InstalledPackage, Source, TargetSpec, TransactionPlan, TransactionOperation};
-pub use resolver::Resolver;
+pub use resolver::{BackendError, ResolutionResult, Resolver};
 pub use storage::Storage;

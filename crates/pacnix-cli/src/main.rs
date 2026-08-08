@@ -4,7 +4,7 @@ use pacnix_backend_alpm::AlpmBackend;
 use pacnix_backend_aur::AurBackend;
 use pacnix_backend_nix::NixBackend;
 use pacnix_core::{
-    Candidate, Command, Interaction, PackageBackend, Resolver, Source, TargetSpec,
+    Candidate, Command, Interaction, InstalledPackage, PackageBackend, Resolver, TargetSpec,
 };
 
 const VERBS: &[&str] = &["install", "remove", "search", "info", "list", "upgrade", "sync"];
@@ -74,41 +74,84 @@ fn main() {
 fn run(resolver: &Resolver, command: Command) {
     match command {
         Command::Search(query) => {
-            let candidates = resolver.resolve(&query).unwrap_or_default();
-            if candidates.is_empty() {
-                println!("nothing found for: {query}");
+            let result = resolver.resolve(&query);
+            for err in &result.backend_errors {
+                eprintln!("pacnix: {}: {}", err.backend, err.message);
             }
-            for c in &candidates {
-                println!("{}/{}", c.source_name(), c.name);
+            if result.candidates.is_empty() {
+                println!("nothing found for: {query}");
+                return;
+            }
+            for c in &result.candidates {
+                println!("{}/{}", c.provider, c.name);
+                if let Some(d) = &c.description {
+                    println!("    {d}");
+                }
             }
         }
-        Command::ListInstalled => println!("no installed packages (backends not implemented)"),
-        other => {
-            let interaction = match other {
-                Command::Install(t) => Interaction::SelectCandidate(
-                    t.iter()
-                        .map(|t| Candidate {
-                            source: Source::Alpm,
-                            provider: "extra".into(),
-                            name: t.query.clone(),
-                            version: None,
-                            description: None,
-                        })
-                        .collect(),
-                ),
-                _ => return,
-            };
-            match interaction {
-                Interaction::SelectCandidate(c) => {
-                    println!("resolve candidates ({}):", c.len());
-                    for (i, cand) in c.iter().enumerate() {
-                        println!("  {}) {}/{}", i + 1, cand.source_name(), cand.name);
-                    }
+        Command::ListInstalled => {
+            let mut found: Vec<InstalledPackage> = Vec::new();
+            for backend in resolver.backends() {
+                match backend.installed() {
+                    Ok(mut pkgs) => found.append(&mut pkgs),
+                    Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
                 }
-                Interaction::Confirm(p) => println!("plan: {} {}", p.backend_ref, p.name),
-                Interaction::RequestPrivilege(_) => println!("need privilege"),
             }
-            println!("(Phase 0 skeleton: backends not implemented yet)");
+            for pkg in &found {
+                println!("{} {}", pkg.name, pkg.version.as_deref().unwrap_or("-"));
+            }
+        }
+        Command::Install(targets) => {
+            for target in &targets {
+                let result = resolver.resolve(&target.query);
+                for err in &result.backend_errors {
+                    eprintln!("pacnix: {}: {}", err.backend, err.message);
+                }
+                if result.candidates.is_empty() {
+                    eprintln!("pacnix: nothing found for: {}", target.query);
+                    continue;
+                }
+                let interaction = if result.candidates.len() == 1 {
+                    Interaction::Confirm(
+                        select_backend(resolver, &result.candidates[0]).plan_install(&result.candidates[0])
+                            .unwrap_or_else(|e| {
+                                eprintln!("pacnix: {e}");
+                                std::process::exit(1);
+                            }),
+                    )
+                } else {
+                    Interaction::SelectCandidate(result.candidates)
+                };
+                match interaction {
+                    Interaction::SelectCandidate(candidates) => {
+                        println!("select candidate for {}:", target.query);
+                        for (i, cand) in candidates.iter().enumerate() {
+                            println!("  {}) {}/{}", i + 1, cand.provider, cand.name);
+                        }
+                    }
+                    Interaction::Confirm(plan) => {
+                        println!(
+                            "plan: {} {} operations={}",
+                            plan.backend_ref,
+                            plan.name,
+                            plan.operations.len()
+                        );
+                    }
+                    Interaction::RequestPrivilege(_) => println!("need privilege"),
+                }
+            }
+        }
+        _ => {
+            println!("(Phase 0 skeleton: not implemented yet)");
         }
     }
+}
+
+fn select_backend<'a>(resolver: &'a Resolver, candidate: &Candidate) -> &'a dyn PackageBackend {
+    resolver
+        .backends()
+        .iter()
+        .find(|b| b.source() == candidate.source)
+        .expect("backend for candidate source must be registered")
+        .as_ref()
 }

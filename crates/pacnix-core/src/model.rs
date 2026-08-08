@@ -17,12 +17,8 @@ pub struct Candidate {
 }
 
 impl Candidate {
-    pub fn source_name(&self) -> &'static str {
-        match &self.source {
-            Source::Alpm => "extra",
-            Source::Aur => "aur",
-            Source::Nix => "nixpkgs",
-        }
+    pub fn installed_label(&self) -> String {
+        format!("{}/{}", self.provider, self.name)
     }
 }
 
