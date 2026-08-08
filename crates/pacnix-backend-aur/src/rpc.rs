@@ -24,6 +24,33 @@ pub struct AurPackage {
     pub url_path: Option<String>,
 }
 
+pub fn existing_names(names: &[String]) -> Result<Vec<String>, String> {
+    let mut existing = Vec::new();
+    for chunk in names.chunks(50) {
+        let mut url = String::from("https://aur.archlinux.org/rpc/v5/info?");
+        for name in chunk {
+            url.push_str("arg[]=");
+            url.push_str(name);
+            url.push('&');
+        }
+        let agent = ureq::Agent::new_with_defaults();
+        let body = agent
+            .get(&url)
+            .call()
+            .map_err(|e| format!("AUR RPC failed: {e}"))?
+            .into_body()
+            .read_to_string()
+            .map_err(|e| e.to_string())?;
+        let response: RpcResponse = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        for result in response.results {
+            existing.push(result.name);
+        }
+    }
+    existing.sort();
+    existing.dedup();
+    Ok(existing)
+}
+
 pub fn search_from_json(json: &str) -> Result<Vec<AurPackage>, String> {
     let response: RpcResponse = serde_json::from_str(json).map_err(|e| e.to_string())?;
     if response.kind == "error" {

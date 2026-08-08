@@ -706,7 +706,76 @@ fn signed_total(deltas: &[Option<i64>]) -> Option<i64> {
     (!known.is_empty()).then(|| known.iter().sum())
 }
 
+fn tag_foreign_from_aur(resolver: &Resolver, storage: &Storage) {
+    if !resolver
+        .backends()
+        .iter()
+        .any(|b| b.source() == Source::Aur)
+    {
+        return;
+    }
+    let pending = match storage.foreign_instances() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("pacnix: {e}");
+            return;
+        }
+    };
+    if pending.is_empty() {
+        return;
+    }
+    let names: Vec<String> = pending.iter().map(|(n, _, _, _)| n.clone()).collect();
+    let existing = match pacnix_backend_aur::rpc::existing_names(&names) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("pacnix: aur rpc: {e}");
+            return;
+        }
+    };
+    let mut tagged = 0usize;
+    for (name, installed_backend_ref, version, installed_at) in pending {
+        let installed_at = match installed_at {
+            Some(t) => t,
+            None => continue,
+        };
+        if !existing.iter().any(|n| n == &name) {
+            continue;
+        }
+        if storage
+            .known_source_for(
+                &name,
+                "alpm",
+                &installed_backend_ref,
+                version.as_deref(),
+                Some(installed_at),
+            )
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            continue;
+        }
+        let receipt = pacnix_core::model::InstallReceipt {
+            package_name: name.clone(),
+            installed_backend: "alpm".into(),
+            installed_backend_ref: installed_backend_ref.clone(),
+            source: "aur".into(),
+            source_ref: format!("aur/{name}"),
+            version: version.clone(),
+            installed_at,
+        };
+        match storage.record_receipt(&receipt) {
+            Ok(()) => tagged += 1,
+            Err(e) => eprintln!("pacnix: {e}"),
+        }
+    }
+    if tagged > 0 {
+        println!("reconcile: tagged {tagged} foreign packages as aur-sourced");
+    }
+}
+
 fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
+    tag_foreign_from_aur(resolver, storage);
     let generation = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)

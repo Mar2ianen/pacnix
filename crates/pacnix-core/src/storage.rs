@@ -10,6 +10,8 @@ pub struct Storage {
     fail_upserts: std::sync::atomic::AtomicBool,
 }
 
+pub type ForeignInstance = (String, String, Option<String>, Option<i64>);
+
 const SCHEMA_VERSION: i64 = 2;
 
 impl Storage {
@@ -343,6 +345,35 @@ impl Storage {
             .map_err(|e| e.to_string())
     }
 
+    pub fn foreign_instances(&self) -> Result<Vec<ForeignInstance>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT p.canonical_name, i.backend_ref, i.version, i.installed_at
+                 FROM installed_instances i
+                 JOIN packages p ON p.id = i.package_id
+                 WHERE i.backend = 'alpm'
+                   AND i.provenance = 'foreign'
+                   AND i.installed_at IS NOT NULL",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
     pub fn known_source_for(
         &self,
         package_name: &str,
@@ -627,6 +658,53 @@ mod tests {
             )
             .unwrap();
         assert_eq!(inserted, 0, "failed transaction must leave no partial rows");
+    }
+
+    #[test]
+    fn foreign_instances_lists_only_unclassified_alpm_rows() {
+        let storage = tmp_db();
+        let foreign = InstalledPackage {
+            source: Source::Alpm,
+            backend_ref: "local/fromcue".into(),
+            name: "fromcue".into(),
+            version: Some("1.0-1".into()),
+            scope: None,
+            installed_at: Some(42),
+            provenance: crate::Provenance::Foreign,
+        };
+        storage.upsert_instance(&foreign).unwrap();
+        let known = InstalledPackage {
+            backend_ref: "local/knownone".into(),
+            name: "knownone".into(),
+            ..foreign.clone()
+        };
+        storage.upsert_instance(&known).unwrap();
+        let rows = storage.foreign_instances().unwrap();
+        assert_eq!(rows.len(), 2, "both rows are foreign");
+        assert_eq!(rows[0].0, "fromcue");
+        assert_eq!(rows[1].0, "knownone");
+        let receipt = crate::InstallReceipt {
+            package_name: "knownone".into(),
+            installed_backend: "alpm".into(),
+            installed_backend_ref: "local/knownone".into(),
+            source: "aur".into(),
+            source_ref: "aur/knownone".into(),
+            version: Some("1.0-1".into()),
+            installed_at: 42,
+        };
+        storage.record_receipt(&receipt).unwrap();
+        let rows = storage.foreign_instances().unwrap();
+        assert_eq!(rows.len(), 2, "receipts alone must not reclassify");
+        let reclassified = InstalledPackage {
+            provenance: crate::Provenance::PacnixInstalled {
+                source: "aur".into(),
+            },
+            ..known.clone()
+        };
+        storage.upsert_instance(&reclassified).unwrap();
+        let rows = storage.foreign_instances().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "fromcue");
     }
 
     #[test]
