@@ -8,7 +8,7 @@ pub struct Storage {
     conn: Connection,
 }
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 impl Storage {
     pub fn open(path: &str) -> Result<Self, String> {
@@ -57,25 +57,27 @@ impl Storage {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        if version < 1 {
-            for (column, column_type) in [
-                ("provenance", "TEXT"),
-                ("provenance_source", "TEXT"),
-                ("seen_generation", "INTEGER"),
-            ] {
-                let sql =
-                    format!("ALTER TABLE installed_instances ADD COLUMN {column} {column_type}");
-                match conn.execute_batch(&sql) {
-                    Ok(()) => {}
-                    Err(e) if e.to_string().contains("duplicate column name") => {}
-                    Err(e) => return Err(e.to_string()),
+        if version < SCHEMA_VERSION {
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            if version < 1 {
+                for (column, column_type) in [
+                    ("provenance", "TEXT"),
+                    ("provenance_source", "TEXT"),
+                    ("seen_generation", "INTEGER"),
+                ] {
+                    let sql = format!(
+                        "ALTER TABLE installed_instances ADD COLUMN {column} {column_type}"
+                    );
+                    match tx.execute_batch(&sql) {
+                        Ok(()) => {}
+                        Err(e) if e.to_string().contains("duplicate column name") => {}
+                        Err(e) => return Err(e.to_string()),
+                    }
                 }
-            }
-            conn.execute_batch("DELETE FROM installed_instances WHERE backend = 'aur'")
-                .map_err(|e| e.to_string())?;
-            {
+                tx.execute_batch("DELETE FROM installed_instances WHERE backend = 'aur'")
+                    .map_err(|e| e.to_string())?;
                 let legacy: Vec<(String, String, String)> = {
-                    let mut stmt = conn
+                    let mut stmt = tx
                         .prepare(
                             "SELECT query, backend, backend_ref FROM aliases
                              WHERE backend NOT IN ('alpm', 'aur', 'nix')
@@ -100,15 +102,45 @@ impl Storage {
                 for (query, backend, backend_ref) in legacy {
                     let new_backend = if backend == "aur" { "aur" } else { "alpm" };
                     let new_ref = format!("{backend}/{backend_ref}");
-                    conn.execute(
+                    tx.execute(
                         "UPDATE aliases SET backend = ?2, backend_ref = ?3 WHERE query = ?1",
                         params![query, new_backend, new_ref],
                     )
                     .map_err(|e| e.to_string())?;
                 }
             }
-            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+            if version < 2 {
+                tx.execute_batch(
+                    "CREATE TABLE installed_instances_new (
+                        id             INTEGER PRIMARY KEY,
+                        package_id     INTEGER NOT NULL REFERENCES packages(id),
+                        backend        TEXT NOT NULL,
+                        backend_ref    TEXT NOT NULL,
+                        version        TEXT,
+                        scope          TEXT,
+                        provenance     TEXT,
+                        provenance_source TEXT,
+                        installed_at   INTEGER,
+                        last_seen_at   INTEGER NOT NULL,
+                        seen_generation INTEGER,
+                        UNIQUE (backend, backend_ref)
+                     );
+                     INSERT INTO installed_instances_new
+                        (id, package_id, backend, backend_ref, version, scope,
+                         provenance, provenance_source, installed_at,
+                         last_seen_at, seen_generation)
+                        SELECT id, package_id, backend, backend_ref, version, scope,
+                               provenance, provenance_source, installed_at,
+                               last_seen_at, seen_generation
+                        FROM installed_instances;
+                     DROP TABLE installed_instances;
+                     ALTER TABLE installed_instances_new RENAME TO installed_instances;",
+                )
                 .map_err(|e| e.to_string())?;
+            }
+            tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -309,12 +341,13 @@ mod tests {
     use crate::model::InstalledPackage;
     use crate::Source;
 
+    static TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn tmp_db() -> Storage {
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = format!(
             "/tmp/pacnix-test-{}-{}.db",
             std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         );
         let _ = std::fs::remove_file(&path);
         Storage::open(&path).unwrap()
@@ -356,6 +389,94 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrates_v1_to_v2_seen_generation_type() {
+        let path = format!(
+            "/tmp/pacnix-test-v1-{}.db",
+            std::sync::atomic::AtomicU64::fetch_add(
+                &TEST_COUNTER,
+                1,
+                std::sync::atomic::Ordering::SeqCst
+            )
+        );
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE packages (
+                    id             INTEGER PRIMARY KEY,
+                    canonical_name TEXT NOT NULL UNIQUE
+                 );
+                 CREATE TABLE installed_instances (
+                    id             INTEGER PRIMARY KEY,
+                    package_id     INTEGER NOT NULL REFERENCES packages(id),
+                    backend        TEXT NOT NULL,
+                    backend_ref    TEXT NOT NULL,
+                    version        TEXT,
+                    scope          TEXT,
+                    provenance     TEXT,
+                    provenance_source TEXT,
+                    installed_at   INTEGER,
+                    last_seen_at   INTEGER NOT NULL,
+                    seen_generation TEXT
+                 );
+                 CREATE TABLE aliases (
+                    query          TEXT PRIMARY KEY,
+                    backend        TEXT NOT NULL,
+                    backend_ref    TEXT NOT NULL
+                 );
+                 CREATE TABLE install_receipts (
+                    id                  INTEGER PRIMARY KEY,
+                    package_name        TEXT NOT NULL,
+                    installed_backend   TEXT NOT NULL,
+                    installed_backend_ref TEXT NOT NULL,
+                    source              TEXT NOT NULL,
+                    source_ref          TEXT NOT NULL,
+                    version             TEXT,
+                    installed_at        INTEGER NOT NULL
+                 );
+                 INSERT INTO packages (id, canonical_name) VALUES (1, 'oldpkg');
+                 INSERT INTO installed_instances
+                    (id, package_id, backend, backend_ref, version, scope,
+                     provenance, provenance_source, installed_at, last_seen_at,
+                     seen_generation)
+                    VALUES (1, 1, 'alpm', 'local/oldpkg', NULL, NULL, 'sync-known', NULL, 42, 1, 7);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let storage = Storage::open(&path).unwrap();
+        let version: i64 = storage
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let declared: String = storage
+            .conn
+            .query_row(
+                "SELECT type FROM pragma_table_info('installed_instances')
+                 WHERE name = 'seen_generation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(declared, "INTEGER", "v1 DB must be rebuilt with INTEGER");
+        let (installed_at, seen): (i64, i64) = storage
+            .conn
+            .query_row(
+                "SELECT installed_at, seen_generation FROM installed_instances
+                 WHERE backend_ref = 'local/oldpkg'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (installed_at, seen),
+            (42, 7),
+            "rows must survive the rebuild"
+        );
     }
 
     #[test]
