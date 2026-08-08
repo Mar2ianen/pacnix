@@ -8,6 +8,8 @@ pub struct Storage {
     conn: Connection,
 }
 
+const SCHEMA_VERSION: i64 = 1;
+
 impl Storage {
     pub fn open(path: &str) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
@@ -24,8 +26,10 @@ impl Storage {
                 version        TEXT,
                 scope          TEXT,
                 provenance     TEXT,
+                provenance_source TEXT,
                 installed_at   INTEGER,
                 last_seen_at   INTEGER NOT NULL,
+                seen_generation INTEGER,
                 UNIQUE (backend, backend_ref)
              );
              CREATE TABLE IF NOT EXISTS aliases (
@@ -45,7 +49,12 @@ impl Storage {
              );",
         )
         .map_err(|e| e.to_string())?;
-        for column in ["provenance", "seen_generation"] {
+        Self::migrate(&conn)?;
+        Ok(Self { conn })
+    }
+
+    fn migrate(conn: &Connection) -> Result<(), String> {
+        for column in ["provenance", "provenance_source", "seen_generation"] {
             let sql = format!("ALTER TABLE installed_instances ADD COLUMN {column} TEXT");
             match conn.execute_batch(&sql) {
                 Ok(()) => {}
@@ -53,42 +62,50 @@ impl Storage {
                 Err(e) => return Err(e.to_string()),
             }
         }
-        conn.execute_batch("DELETE FROM installed_instances WHERE backend = 'aur'")
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        {
-            let legacy: Vec<(String, String, String)> = {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT query, backend, backend_ref FROM aliases
-                         WHERE backend NOT IN ('alpm', 'aur', 'nix') OR backend_ref NOT LIKE '%/%'",
+        if version < 1 {
+            conn.execute_batch("DELETE FROM installed_instances WHERE backend = 'aur'")
+                .map_err(|e| e.to_string())?;
+            {
+                let legacy: Vec<(String, String, String)> = {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT query, backend, backend_ref FROM aliases
+                             WHERE backend NOT IN ('alpm', 'aur', 'nix')
+                                OR backend_ref NOT LIKE '%/%'",
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map([], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        })
+                        .map_err(|e| e.to_string())?;
+                    let mut out = Vec::new();
+                    for row in rows {
+                        out.push(row.map_err(|e| e.to_string())?);
+                    }
+                    out
+                };
+                for (query, backend, backend_ref) in legacy {
+                    let new_backend = if backend == "aur" { "aur" } else { "alpm" };
+                    let new_ref = format!("{backend}/{backend_ref}");
+                    conn.execute(
+                        "UPDATE aliases SET backend = ?2, backend_ref = ?3 WHERE query = ?1",
+                        params![query, new_backend, new_ref],
                     )
                     .map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    })
-                    .map_err(|e| e.to_string())?;
-                let mut out = Vec::new();
-                for row in rows {
-                    out.push(row.map_err(|e| e.to_string())?);
                 }
-                out
-            };
-            for (query, backend, backend_ref) in legacy {
-                let new_backend = if backend == "aur" { "aur" } else { "alpm" };
-                let new_ref = format!("{backend}/{backend_ref}");
-                conn.execute(
-                    "UPDATE aliases SET backend = ?2, backend_ref = ?3 WHERE query = ?1",
-                    params![query, new_backend, new_ref],
-                )
-                .map_err(|e| e.to_string())?;
             }
+            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+                .map_err(|e| e.to_string())?;
         }
-        Ok(Self { conn })
+        Ok(())
     }
 
     pub fn remember_alias(
@@ -153,12 +170,14 @@ impl Storage {
             .unwrap_or(0);
         tx.execute(
             "INSERT INTO installed_instances
-             (package_id, backend, backend_ref, version, scope, provenance, installed_at, last_seen_at, seen_generation)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             (package_id, backend, backend_ref, version, scope, provenance,
+              provenance_source, installed_at, last_seen_at, seen_generation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(backend, backend_ref) DO UPDATE SET
                 version = excluded.version,
                 scope = excluded.scope,
                 provenance = excluded.provenance,
+                provenance_source = excluded.provenance_source,
                 last_seen_at = excluded.last_seen_at,
                 seen_generation = excluded.seen_generation",
             params![
@@ -168,6 +187,7 @@ impl Storage {
                 pkg.version,
                 pkg.scope,
                 provenance_str(&pkg.provenance),
+                provenance_source(&pkg.provenance),
                 pkg.installed_at,
                 now,
                 generation as i64
@@ -192,7 +212,8 @@ impl Storage {
                 .conn
                 .execute(
                     "DELETE FROM installed_instances
-                     WHERE backend = ?1 AND seen_generation != ?2",
+                     WHERE backend = ?1
+                       AND (seen_generation IS NULL OR seen_generation != ?2)",
                     params![backend, generation as i64],
                 )
                 .map_err(|e| e.to_string())?;
@@ -220,16 +241,27 @@ impl Storage {
             .map_err(|e| e.to_string())
     }
 
-    pub fn known_source_for(&self, package_name: &str) -> Result<Option<String>, String> {
+    pub fn known_source_for(
+        &self,
+        package_name: &str,
+        installed_backend: &str,
+        installed_backend_ref: &str,
+    ) -> Result<Option<String>, String> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT source FROM install_receipts
-                 WHERE package_name = ?1 ORDER BY installed_at DESC LIMIT 1",
+                 WHERE package_name = ?1
+                   AND installed_backend = ?2
+                   AND installed_backend_ref = ?3
+                 ORDER BY installed_at DESC LIMIT 1",
             )
             .map_err(|e| e.to_string())?;
         let mut rows = stmt
-            .query_map(params![package_name], |row| row.get::<_, String>(0))
+            .query_map(
+                params![package_name, installed_backend, installed_backend_ref],
+                |row| row.get::<_, String>(0),
+            )
             .map_err(|e| e.to_string())?;
         match rows.next() {
             Some(Ok(source)) => Ok(Some(source)),
@@ -245,6 +277,13 @@ fn provenance_str(provenance: &crate::model::Provenance) -> &'static str {
         crate::model::Provenance::SyncKnown => "sync-known",
         crate::model::Provenance::Foreign => "foreign",
         crate::model::Provenance::PacnixInstalled { .. } => "pacnix-installed",
+    }
+}
+
+fn provenance_source(provenance: &crate::model::Provenance) -> Option<String> {
+    match provenance {
+        crate::model::Provenance::PacnixInstalled { source } => Some(source.clone()),
+        _ => None,
     }
 }
 
@@ -296,6 +335,11 @@ mod tests {
             storage.alias("hiddify").unwrap(),
             Some(("aur".to_string(), "aur/hiddify-bin".to_string()))
         );
+        let version: i64 = storage
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -324,6 +368,25 @@ mod tests {
     }
 
     #[test]
+    fn sweep_removes_legacy_null_generation() {
+        let storage = tmp_db();
+        let pkg = InstalledPackage {
+            source: Source::Alpm,
+            backend_ref: "local/oldpkg".into(),
+            name: "oldpkg".into(),
+            version: None,
+            scope: None,
+            installed_at: None,
+            provenance: crate::Provenance::SyncKnown,
+        };
+        storage.upsert_instance(&pkg).unwrap();
+        let removed = storage
+            .sweep_stale_instances(10, &["alpm".to_string()])
+            .unwrap();
+        assert_eq!(removed, 1);
+    }
+
+    #[test]
     fn receipt_roundtrip() {
         let storage = tmp_db();
         let receipt = crate::InstallReceipt {
@@ -336,8 +399,22 @@ mod tests {
             installed_at: 42,
         };
         storage.record_receipt(&receipt).unwrap();
-        assert_eq!(storage.known_source_for("foo").unwrap(), Some("aur".into()));
-        assert_eq!(storage.known_source_for("bar").unwrap(), None);
+        assert_eq!(
+            storage
+                .known_source_for("foo", "alpm", "local/foo")
+                .unwrap(),
+            Some("aur".into())
+        );
+        assert_eq!(
+            storage.known_source_for("foo", "nix", "nix/foo").unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .known_source_for("bar", "alpm", "local/bar")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

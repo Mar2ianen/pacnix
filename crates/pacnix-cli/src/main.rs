@@ -197,27 +197,34 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
             let mut errors = Vec::new();
             let mut scanned: Vec<String> = Vec::new();
             for backend in resolver.backends() {
-                match backend.installed() {
-                    Ok(pkgs) => {
-                        scanned.push(backend.name().to_string());
-                        for pkg in &pkgs {
-                            let mut pkg = pkg.clone();
-                            if pkg.provenance == pacnix_core::Provenance::Foreign {
-                                if let Ok(Some(source)) = storage.known_source_for(&pkg.name) {
-                                    pkg.provenance =
-                                        pacnix_core::Provenance::PacnixInstalled { source };
-                                }
-                            }
-                            if let Err(e) =
-                                storage.upsert_instance_with_generation(&pkg, generation)
-                            {
-                                errors.push(format!("{}: storage: {e}", backend.name()));
-                            }
-                        }
-                        count += pkgs.len();
+                let pkgs = match backend.installed() {
+                    Ok(pkgs) => pkgs,
+                    Err(e) => {
+                        errors.push(format!("{}: {e}", backend.name()));
+                        continue;
                     }
-                    Err(e) => errors.push(format!("{}: {e}", backend.name())),
+                };
+                let mut backend_ok = true;
+                for pkg in &pkgs {
+                    let mut pkg = pkg.clone();
+                    if pkg.provenance == pacnix_core::Provenance::Foreign {
+                        if let Ok(Some(source)) = storage.known_source_for(
+                            &pkg.name,
+                            pkg.source.as_str(),
+                            &pkg.backend_ref,
+                        ) {
+                            pkg.provenance = pacnix_core::Provenance::PacnixInstalled { source };
+                        }
+                    }
+                    if let Err(e) = storage.upsert_instance_with_generation(&pkg, generation) {
+                        backend_ok = false;
+                        errors.push(format!("{}: storage: {e}", backend.name()));
+                    }
                 }
+                if backend_ok {
+                    scanned.push(backend.name().to_string());
+                }
+                count += pkgs.len();
             }
             match storage.sweep_stale_instances(generation, &scanned) {
                 Ok(removed) => {
