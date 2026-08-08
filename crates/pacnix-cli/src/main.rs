@@ -672,9 +672,8 @@ fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     let mut count = 0;
+    let mut removed_total = 0;
     let mut errors = Vec::new();
-    let mut scanned: Vec<String> = Vec::new();
-    let mut upserts: Vec<InstalledPackage> = Vec::new();
     for backend in resolver.backends() {
         let pkgs = match backend.installed() {
             Ok(pkgs) => pkgs,
@@ -683,9 +682,8 @@ fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
                 continue;
             }
         };
-        let backend_ok = true;
-        for pkg in &pkgs {
-            let mut pkg = pkg.clone();
+        let mut upserts: Vec<InstalledPackage> = Vec::new();
+        for mut pkg in pkgs {
             if pkg.provenance == pacnix_core::Provenance::Foreign && pkg.installed_at.is_some() {
                 if let Ok(Some(source)) = storage.known_source_for(
                     &pkg.name,
@@ -710,26 +708,17 @@ fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
                 }
             }
             upserts.push(pkg);
+            count += 1;
         }
-        if backend_ok {
-            scanned.push(backend.name().to_string());
+        match storage.upsert_and_sweep(&upserts, generation, backend.name()) {
+            Ok(removed) => removed_total += removed,
+            Err(e) => errors.push(format!("storage ({}): {e}", backend.name())),
         }
-        count += pkgs.len();
     }
-    if let Err(e) = storage.upsert_instances_with_generation(&upserts, generation) {
-        errors.push(format!("storage: {e}"));
-    }
-    let removed = match storage.sweep_stale_instances(generation, &scanned) {
-        Ok(removed) => removed,
-        Err(e) => {
-            errors.push(format!("storage: {e}"));
-            0
-        }
-    };
     for e in &errors {
         eprintln!("pacnix: {e}");
     }
-    (count, removed)
+    (count, removed_total)
 }
 
 fn select_backend<'a>(resolver: &'a Resolver, candidate: &Candidate) -> &'a dyn PackageBackend {

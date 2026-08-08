@@ -179,11 +179,12 @@ impl Storage {
         }
     }
 
-    pub fn upsert_instances_with_generation(
+    pub fn upsert_and_sweep(
         &self,
         pkgs: &[InstalledPackage],
         generation: u64,
-    ) -> Result<(), String> {
+        sweep_backend: &str,
+    ) -> Result<usize, String> {
         let tx = self
             .conn
             .unchecked_transaction()
@@ -193,6 +194,10 @@ impl Storage {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         for pkg in pkgs {
+            #[cfg(test)]
+            if FORCE_UPSERT_FAILURE.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("forced upsert failure (test hook)".into());
+            }
             tx.execute(
                 "INSERT INTO packages (canonical_name) VALUES (?1)
                  ON CONFLICT DO NOTHING",
@@ -234,7 +239,16 @@ impl Storage {
             )
             .map_err(|e| e.to_string())?;
         }
-        tx.commit().map_err(|e| e.to_string())
+        let removed = tx
+            .execute(
+                "DELETE FROM installed_instances
+                 WHERE backend = ?1
+                   AND (seen_generation IS NULL OR seen_generation != ?2)",
+                params![sweep_backend, generation as i64],
+            )
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(removed)
     }
 
     pub fn upsert_instance_with_generation(
@@ -297,26 +311,6 @@ impl Storage {
         self.upsert_instance_with_generation(pkg, 0)
     }
 
-    pub fn sweep_stale_instances(
-        &self,
-        generation: u64,
-        backends: &[String],
-    ) -> Result<usize, String> {
-        let mut removed = 0;
-        for backend in backends {
-            removed += self
-                .conn
-                .execute(
-                    "DELETE FROM installed_instances
-                     WHERE backend = ?1
-                       AND (seen_generation IS NULL OR seen_generation != ?2)",
-                    params![backend, generation as i64],
-                )
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(removed)
-    }
-
     pub fn record_receipt(&self, receipt: &crate::model::InstallReceipt) -> Result<(), String> {
         self.conn
             .execute(
@@ -376,6 +370,10 @@ impl Storage {
         }
     }
 }
+
+#[cfg(test)]
+static FORCE_UPSERT_FAILURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn provenance_str(provenance: &crate::model::Provenance) -> &'static str {
     match provenance {
@@ -556,9 +554,7 @@ mod tests {
             ..pkg.clone()
         };
         storage.upsert_instance_with_generation(&pkg2, 2).unwrap();
-        let removed = storage
-            .sweep_stale_instances(2, &["alpm".to_string()])
-            .unwrap();
+        let removed = storage.upsert_and_sweep(&[pkg2], 2, "alpm").unwrap();
         assert_eq!(removed, 1);
     }
 
@@ -575,10 +571,50 @@ mod tests {
             provenance: crate::Provenance::SyncKnown,
         };
         storage.upsert_instance(&pkg).unwrap();
-        let removed = storage
-            .sweep_stale_instances(10, &["alpm".to_string()])
-            .unwrap();
+        let removed = storage.upsert_and_sweep(&[], 10, "alpm").unwrap();
         assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn failed_upsert_sweeps_nothing() {
+        let storage = tmp_db();
+        let pkg = InstalledPackage {
+            source: Source::Alpm,
+            backend_ref: "local/keepme".into(),
+            name: "keepme".into(),
+            version: None,
+            scope: None,
+            installed_at: None,
+            provenance: crate::Provenance::Foreign,
+        };
+        storage.upsert_instance_with_generation(&pkg, 1).unwrap();
+        FORCE_UPSERT_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let doomed = InstalledPackage {
+            name: "boom".into(),
+            backend_ref: "local/boom".into(),
+            ..pkg.clone()
+        };
+        let result = storage.upsert_and_sweep(&[doomed], 2, "alpm");
+        FORCE_UPSERT_FAILURE.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(result.is_err(), "upsert must fail");
+        let kept: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM installed_instances WHERE backend = 'alpm' AND backend_ref = 'local/keepme'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "old row must survive failed reconcile");
+        let inserted: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM installed_instances WHERE backend_ref = 'local/boom'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(inserted, 0, "failed transaction must leave no partial rows");
     }
 
     #[test]
