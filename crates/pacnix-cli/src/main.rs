@@ -212,6 +212,8 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
                             &pkg.name,
                             pkg.source.as_str(),
                             &pkg.backend_ref,
+                            pkg.version.as_deref(),
+                            pkg.installed_at,
                         ) {
                             pkg.provenance = pacnix_core::Provenance::PacnixInstalled { source };
                         }

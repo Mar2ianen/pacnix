@@ -3,6 +3,17 @@
 use pacnix_core::model::{Candidate, InstalledPackage, Provenance, Source};
 use pacnix_core::parsers::parse_pairs;
 
+pub fn desc_field(content: &str, field: &str) -> Option<String> {
+    let marker = format!("{field}\n");
+    let pos = content.find(&marker)?;
+    let value = content[pos + marker.len()..].lines().next()?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 pub fn parse_search(output: &str) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     let mut lines = output.lines();
@@ -50,6 +61,14 @@ pub fn parse_installed(output: &str, provenance: Provenance) -> Vec<InstalledPac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desc_field_extracts_name_and_install_date() {
+        let desc = "%NAME%\nfoo\n\n%VERSION%\n1.0-1\n\n%INSTALLDATE%\n1700000000\n";
+        assert_eq!(desc_field(desc, "%NAME%"), Some("foo".into()));
+        assert_eq!(desc_field(desc, "%INSTALLDATE%"), Some("1700000000".into()));
+        assert_eq!(desc_field(desc, "%MISSING%"), None);
+    }
 
     #[test]
     fn parses_search_output() {

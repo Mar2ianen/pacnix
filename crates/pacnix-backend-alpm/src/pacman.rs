@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
+use std::collections::HashMap;
 use std::process::Command;
 
 use pacnix_core::model::{
@@ -12,6 +13,25 @@ use crate::parsers;
 const PACMAN: &str = "pacman";
 
 pub struct AlpmBackend;
+
+fn local_install_dates() -> HashMap<String, i64> {
+    let mut dates = HashMap::new();
+    let Ok(entries) = std::fs::read_dir("/var/lib/pacman/local") else {
+        return dates;
+    };
+    for entry in entries.flatten() {
+        let Ok(content) = std::fs::read_to_string(entry.path().join("desc")) else {
+            continue;
+        };
+        let name = parsers::desc_field(&content, "%NAME%");
+        let date =
+            parsers::desc_field(&content, "%INSTALLDATE%").and_then(|d| d.parse::<i64>().ok());
+        if let (Some(name), Some(date)) = (name, date) {
+            dates.insert(name, date);
+        }
+    }
+    dates
+}
 
 impl PackageBackend for AlpmBackend {
     fn name(&self) -> &'static str {
@@ -30,11 +50,15 @@ impl PackageBackend for AlpmBackend {
     fn installed(&self) -> Result<Vec<InstalledPackage>, String> {
         let native = run_pacman(&["-Qn"])?;
         let foreign = run_pacman(&["-Qm"])?;
+        let dates = local_install_dates();
         let mut pkgs = parsers::parse_installed(&native, pacnix_core::Provenance::SyncKnown);
         pkgs.extend(parsers::parse_installed(
             &foreign,
             pacnix_core::Provenance::Foreign,
         ));
+        for pkg in &mut pkgs {
+            pkg.installed_at = dates.get(&pkg.name).copied();
+        }
         Ok(pkgs)
     }
 

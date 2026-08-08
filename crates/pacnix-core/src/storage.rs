@@ -54,18 +54,23 @@ impl Storage {
     }
 
     fn migrate(conn: &Connection) -> Result<(), String> {
-        for column in ["provenance", "provenance_source", "seen_generation"] {
-            let sql = format!("ALTER TABLE installed_instances ADD COLUMN {column} TEXT");
-            match conn.execute_batch(&sql) {
-                Ok(()) => {}
-                Err(e) if e.to_string().contains("duplicate column name") => {}
-                Err(e) => return Err(e.to_string()),
-            }
-        }
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
         if version < 1 {
+            for (column, column_type) in [
+                ("provenance", "TEXT"),
+                ("provenance_source", "TEXT"),
+                ("seen_generation", "INTEGER"),
+            ] {
+                let sql =
+                    format!("ALTER TABLE installed_instances ADD COLUMN {column} {column_type}");
+                match conn.execute_batch(&sql) {
+                    Ok(()) => {}
+                    Err(e) if e.to_string().contains("duplicate column name") => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
             conn.execute_batch("DELETE FROM installed_instances WHERE backend = 'aur'")
                 .map_err(|e| e.to_string())?;
             {
@@ -178,6 +183,7 @@ impl Storage {
                 scope = excluded.scope,
                 provenance = excluded.provenance,
                 provenance_source = excluded.provenance_source,
+                installed_at = excluded.installed_at,
                 last_seen_at = excluded.last_seen_at,
                 seen_generation = excluded.seen_generation",
             params![
@@ -246,6 +252,8 @@ impl Storage {
         package_name: &str,
         installed_backend: &str,
         installed_backend_ref: &str,
+        version: Option<&str>,
+        installed_at: Option<i64>,
     ) -> Result<Option<String>, String> {
         let mut stmt = self
             .conn
@@ -254,12 +262,20 @@ impl Storage {
                  WHERE package_name = ?1
                    AND installed_backend = ?2
                    AND installed_backend_ref = ?3
+                   AND version IS ?4
+                   AND installed_at = ?5
                  ORDER BY installed_at DESC LIMIT 1",
             )
             .map_err(|e| e.to_string())?;
         let mut rows = stmt
             .query_map(
-                params![package_name, installed_backend, installed_backend_ref],
+                params![
+                    package_name,
+                    installed_backend,
+                    installed_backend_ref,
+                    version,
+                    installed_at,
+                ],
                 |row| row.get::<_, String>(0),
             )
             .map_err(|e| e.to_string())?;
@@ -401,17 +417,33 @@ mod tests {
         storage.record_receipt(&receipt).unwrap();
         assert_eq!(
             storage
-                .known_source_for("foo", "alpm", "local/foo")
+                .known_source_for("foo", "alpm", "local/foo", Some("1.0-1"), Some(42))
                 .unwrap(),
             Some("aur".into())
         );
         assert_eq!(
-            storage.known_source_for("foo", "nix", "nix/foo").unwrap(),
+            storage
+                .known_source_for("foo", "alpm", "local/foo", Some("1.0-1"), Some(43))
+                .unwrap(),
+            None,
+            "reinstalled incarnation must not inherit the old receipt"
+        );
+        assert_eq!(
+            storage
+                .known_source_for("foo", "alpm", "local/foo", Some("2.0-1"), Some(42))
+                .unwrap(),
+            None,
+            "a different version must not match"
+        );
+        assert_eq!(
+            storage
+                .known_source_for("foo", "nix", "nix/foo", None, None)
+                .unwrap(),
             None
         );
         assert_eq!(
             storage
-                .known_source_for("bar", "alpm", "local/bar")
+                .known_source_for("bar", "alpm", "local/bar", None, None)
                 .unwrap(),
             None
         );
