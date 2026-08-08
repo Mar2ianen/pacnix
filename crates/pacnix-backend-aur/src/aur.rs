@@ -17,13 +17,7 @@ fn build_dir(package: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("pacnix-aur-{package}"))
 }
 
-fn fetch_snapshot(package: &str) -> Result<std::path::PathBuf, String> {
-    let dir = build_dir(package);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
-    }
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let tarball = dir.join(format!("{package}.tar.gz"));
+fn try_download_snapshot(tarball: &std::path::Path, package: &str) -> Result<(), String> {
     let agent = ureq::Agent::new_with_defaults();
     let response = agent
         .get(&snapshot_url(package))
@@ -33,7 +27,31 @@ fn fetch_snapshot(package: &str) -> Result<std::path::PathBuf, String> {
         .into_body()
         .read_to_vec()
         .map_err(|e| format!("failed to read AUR snapshot: {e}"))?;
-    std::fs::write(&tarball, bytes).map_err(|e| e.to_string())?;
+    std::fs::write(tarball, bytes).map_err(|e| e.to_string())
+}
+
+fn fetch_snapshot(package: &str) -> Result<std::path::PathBuf, String> {
+    let dir = build_dir(package);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let tarball = dir.join(format!("{package}.tar.gz"));
+    let mut last_err = String::new();
+    for attempt in 1..=3 {
+        match try_download_snapshot(&tarball, package) {
+            Ok(()) => break,
+            Err(e) => {
+                last_err = e;
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(500 * attempt as u64));
+                }
+            }
+        }
+    }
+    if !last_err.is_empty() {
+        return Err(format!("{last_err} (after 3 attempts)"));
+    }
     let status = std::process::Command::new("tar")
         .arg("-xzf")
         .arg(&tarball)
