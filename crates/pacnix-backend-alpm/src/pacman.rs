@@ -7,7 +7,7 @@ use std::process::Command;
 use pacnix_core::model::{
     Candidate, InstalledPackage, Source, TransactionOperation, TransactionPlan,
 };
-use pacnix_core::{ExecutionContext, PackageBackend};
+use pacnix_core::{ExecutionContext, PackageBackend, UpgradeImpact, UpgradeImpactEntry};
 
 use crate::parsers;
 
@@ -143,22 +143,25 @@ impl PackageBackend for AlpmBackend {
         Ok(parsers::parse_installed_size(&output))
     }
 
-    fn upgrade_delta_estimate(&self, name: &str) -> Result<Option<i64>, String> {
-        let new_out = match run_pacman(&["-Si", name]) {
-            Ok(out) => out,
-            Err(_) => return Ok(None),
-        };
-        let old_out = match run_pacman(&["-Qi", name]) {
-            Ok(out) => out,
-            Err(_) => return Ok(None),
-        };
-        match (
-            parsers::parse_installed_size(&new_out),
-            parsers::parse_installed_size(&old_out),
-        ) {
-            (Some(new), Some(old)) => Ok(Some(new as i64 - old as i64)),
-            _ => Ok(None),
+    fn upgrade_impact_estimate(&self, _plan: &TransactionPlan) -> Result<UpgradeImpact, String> {
+        let output = run_pacman(&["-Su", "--print"])?;
+        let mut entries = Vec::new();
+        for (repo, name) in parsers::parse_upgrade_candidates(&output) {
+            let new_size = run_pacman(&["-Si", &format!("{repo}/{name}")])
+                .ok()
+                .as_deref()
+                .and_then(parsers::parse_installed_size);
+            let old_size = run_pacman(&["-Qi", &name])
+                .ok()
+                .as_deref()
+                .and_then(parsers::parse_installed_size);
+            entries.push(UpgradeImpactEntry {
+                name,
+                old_size,
+                new_size,
+            });
         }
+        Ok(UpgradeImpact { entries })
     }
 
     fn receipt_instances(
@@ -200,6 +203,7 @@ impl PackageBackend for AlpmBackend {
 fn run_pacman(args: &[&str]) -> Result<String, String> {
     let output = Command::new(PACMAN)
         .args(args)
+        .env("LC_ALL", "C")
         .output()
         .map_err(|e| format!("failed to run pacman: {e}"))?;
     if !output.status.success() {

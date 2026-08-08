@@ -579,19 +579,21 @@ fn print_install_summary(planned: &[PlannedInstall]) {
             .map(|i| i.backend.install_size_estimate(&i.candidate).ok().flatten())
             .collect();
         let total: u64 = sizes.iter().flatten().sum();
-        for (item, size) in items.iter().zip(sizes) {
+        for (item, size) in items.iter().zip(sizes.iter()) {
             match size {
                 Some(b) => println!(
                     "  {}/{} ({} disk)",
                     item.candidate.provider,
                     item.candidate.name,
-                    human_size(b)
+                    human_size(*b)
                 ),
                 None => println!("  {}/{}", item.candidate.provider, item.candidate.name),
             }
         }
-        if total > 0 {
+        if sizes.iter().all(Option::is_some) && !sizes.is_empty() {
             println!("  Total: {} disk", human_size(total));
+        } else if sizes.iter().any(Option::is_some) {
+            println!("  Known subtotal: {} disk", human_size(total));
         }
     }
     println!();
@@ -616,52 +618,78 @@ fn print_removal_summary(planned: &[PlannedRemoval]) {
         .map(|i| i.backend.remove_size_estimate(&i.pkg).ok().flatten())
         .collect();
     let total: u64 = sizes.iter().flatten().sum();
-    for (item, size) in planned.iter().zip(sizes) {
+    for (item, size) in planned.iter().zip(sizes.iter()) {
         match size {
             Some(b) => println!(
                 "  {} ({} freed) via {}",
                 item.pkg.name,
-                human_size(b),
+                human_size(*b),
                 item.backend.name()
             ),
             None => println!("  {} via {}", item.pkg.name, item.backend.name()),
         }
     }
-    if total > 0 {
+    if sizes.iter().all(Option::is_some) && !sizes.is_empty() {
         println!("  Total: {} freed", human_size(total));
+    } else if sizes.iter().any(Option::is_some) {
+        println!("  Known subtotal: {} freed", human_size(total));
     }
     println!();
 }
 
 fn print_upgrade_summary(planned: &[PlannedUpgrade]) {
     println!("\n:: Packages to upgrade");
-    let deltas: Vec<Option<i64>> = planned
-        .iter()
-        .map(|i| {
-            i.backend
-                .upgrade_delta_estimate(&i.plan.name)
-                .ok()
-                .flatten()
-        })
-        .collect();
-    let total: i64 = deltas.iter().flatten().sum();
-    for (item, delta) in planned.iter().zip(deltas) {
-        match delta {
-            Some(d) => println!(
-                "  {} (Δ{} disk) via {}",
-                item.plan.name,
-                human_size(d.unsigned_abs()),
-                item.backend.name()
-            ),
-            None => println!("  {} via {}", item.plan.name, item.backend.name()),
+    let mut deltas: Vec<Option<i64>> = Vec::new();
+    for item in planned {
+        println!("  {} via {}", item.plan.name, item.backend.name());
+        match item.backend.upgrade_impact_estimate(&item.plan) {
+            Ok(impact) if !impact.entries.is_empty() => {
+                for e in &impact.entries {
+                    match (e.old_size, e.new_size) {
+                        (Some(old), Some(new)) => {
+                            let d = new as i64 - old as i64;
+                            deltas.push(Some(d));
+                            println!(
+                                "    {}: {} -> {} (Δ{} disk)",
+                                e.name,
+                                human_size(old),
+                                human_size(new),
+                                human_size(d.unsigned_abs())
+                            );
+                        }
+                        (None, Some(new)) => {
+                            deltas.push(None);
+                            println!("    {}: {} disk new", e.name, human_size(new));
+                        }
+                        (Some(old), None) => {
+                            deltas.push(None);
+                            println!("    {}: {} disk old", e.name, human_size(old));
+                        }
+                        _ => deltas.push(None),
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("pacnix: upgrade impact ({}): {e}", item.backend.name()),
         }
     }
-    if total != 0 {
+    if deltas.iter().all(Option::is_some) && !deltas.is_empty() {
+        let total: i64 = deltas.iter().flatten().sum();
         println!(
             "  Total: {} {} disk",
             if total < 0 { "-" } else { "+" },
             human_size(total.unsigned_abs())
         );
+    } else if deltas.iter().any(Option::is_some) {
+        let total: i64 = deltas.iter().flatten().sum();
+        println!(
+            "  Known subtotal: {} {} disk",
+            if total < 0 { "-" } else { "+" },
+            human_size(total.unsigned_abs())
+        );
+    }
+    if deltas.iter().any(Option::is_some) {
+        println!("    (impact estimated from current sync DB; refresh may change it)");
     }
     println!();
 }

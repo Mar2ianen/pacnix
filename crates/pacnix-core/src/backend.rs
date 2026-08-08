@@ -7,6 +7,18 @@ pub struct ExecutionContext {
     pub use_sudo: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct UpgradeImpact {
+    pub entries: Vec<UpgradeImpactEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpgradeImpactEntry {
+    pub name: String,
+    pub old_size: Option<u64>,
+    pub new_size: Option<u64>,
+}
+
 pub trait PackageBackend: Send + Sync {
     fn name(&self) -> &'static str;
     fn source(&self) -> Source;
@@ -22,8 +34,8 @@ pub trait PackageBackend: Send + Sync {
     fn remove_size_estimate(&self, _target: &InstalledPackage) -> Result<Option<u64>, String> {
         Ok(None)
     }
-    fn upgrade_delta_estimate(&self, _name: &str) -> Result<Option<i64>, String> {
-        Ok(None)
+    fn upgrade_impact_estimate(&self, _plan: &TransactionPlan) -> Result<UpgradeImpact, String> {
+        Ok(UpgradeImpact::default())
     }
     fn execute_operation(
         &self,

@@ -14,6 +14,17 @@ pub fn desc_field(content: &str, field: &str) -> Option<String> {
     }
 }
 
+pub fn parse_upgrade_candidates(output: &str) -> Vec<(String, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let target = line.split_whitespace().next()?;
+            let (repo, name) = target.split_once('/')?;
+            Some((repo.to_string(), name.to_string()))
+        })
+        .collect()
+}
+
 pub fn parse_installed_size(output: &str) -> Option<u64> {
     let value = output.lines().find_map(|line| {
         let (key, rest) = line.split_once(':')?;
@@ -108,6 +119,20 @@ mod tests {
             Some("Standalone web browser")
         );
         assert_eq!(candidates[1].provider, "chaotic-aur");
+    }
+
+    #[test]
+    fn parses_upgrade_print_list() {
+        let out = "extra/blender 17:5.2.0-3 -> 17:5.2.0-4\nextra/ffmpeg 2:8.1-1 -> 2:8.2-2\n";
+        let candidates = parse_upgrade_candidates(out);
+        assert_eq!(
+            candidates,
+            vec![
+                ("extra".to_string(), "blender".to_string()),
+                ("extra".to_string(), "ffmpeg".to_string()),
+            ]
+        );
+        assert!(parse_upgrade_candidates("no updates").is_empty());
     }
 
     #[test]

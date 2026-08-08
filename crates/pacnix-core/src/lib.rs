@@ -9,7 +9,7 @@ pub mod parsers;
 pub mod resolver;
 pub mod storage;
 
-pub use backend::{ExecutionContext, PackageBackend};
+pub use backend::{ExecutionContext, PackageBackend, UpgradeImpact, UpgradeImpactEntry};
 pub use command::Command;
 pub use executor::{BackendPlan, BackendReport, ExecutionBatch, Executor};
 pub use interaction::{Interaction, PrivilegeProvider, PrivilegedOperation};
