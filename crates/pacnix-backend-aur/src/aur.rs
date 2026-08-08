@@ -107,6 +107,62 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+fn installed_desc(package: &str) -> Result<Option<(String, Option<String>, i64)>, String> {
+    let local = std::path::Path::new("/var/lib/pacman/local");
+    for entry in std::fs::read_dir(local).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let desc_path = dir.join("desc");
+        let desc = match std::fs::read_to_string(&desc_path) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let (name, version) = parse_desc_fields(&desc);
+        if name.as_deref() == Some(package) {
+            let installed_at = std::fs::metadata(&desc_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            return Ok(Some((
+                name.unwrap_or_else(|| package.to_string()),
+                version,
+                installed_at,
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_desc_fields(desc: &str) -> (Option<String>, Option<String>) {
+    let mut name = None;
+    let mut version = None;
+    let lines: Vec<&str> = desc.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let field = lines[i];
+        if field.starts_with('%') && field.ends_with('%') {
+            let value = lines.get(i + 1).copied().unwrap_or("").to_string();
+            match field {
+                "%NAME%" => name = Some(value),
+                "%VERSION%" => version = Some(value),
+                _ => {}
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    (name, version)
+}
+
 impl PackageBackend for AurBackend {
     fn name(&self) -> &'static str {
         "aur"
@@ -169,11 +225,23 @@ impl PackageBackend for AurBackend {
 
     fn receipt_instances(
         &self,
-        _plan: &TransactionPlan,
+        plan: &TransactionPlan,
         _before: &[InstalledPackage],
         _after: &[InstalledPackage],
     ) -> Result<Vec<InstalledPackage>, String> {
-        Ok(Vec::new())
+        let mut receipts = Vec::new();
+        if let Some((name, version, installed_at)) = installed_desc(&plan.name)? {
+            receipts.push(InstalledPackage {
+                source: Source::Alpm,
+                backend_ref: format!("local/{}", plan.name),
+                name,
+                version,
+                scope: None,
+                installed_at: Some(installed_at),
+                provenance: pacnix_core::Provenance::Foreign,
+            });
+        }
+        Ok(receipts)
     }
 
     fn execute_operation(
@@ -216,6 +284,17 @@ impl PackageBackend for AurBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_desc_fields() {
+        let desc = "%NAME%\nmutt-wizard\n\n%VERSION%\n3.3.1-1\n\n%INSTALLDATE%\n1754702000\n";
+        let (name, version) = parse_desc_fields(desc);
+        assert_eq!(name.as_deref(), Some("mutt-wizard"));
+        assert_eq!(version.as_deref(), Some("3.3.1-1"));
+        let (name, version) = parse_desc_fields("%NAME%\nfoo\n%VERSION%-\n");
+        assert_eq!(name.as_deref(), Some("foo"));
+        assert_eq!(version, None);
+    }
 
     #[test]
     fn snapshot_url_is_predictable() {
