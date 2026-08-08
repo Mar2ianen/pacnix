@@ -2,6 +2,9 @@
 resolver = "2"
 members = [
     "crates/pacnix-core",
+    "crates/pacnix-backend-alpm",
+    "crates/pacnix-backend-aur",
+    "crates/pacnix-backend-nix",
     "crates/pacnix-cli",
 ]
 

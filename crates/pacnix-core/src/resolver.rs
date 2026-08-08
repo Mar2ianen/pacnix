@@ -3,13 +3,13 @@
 use crate::backend::PackageBackend;
 use crate::model::{Candidate, Source};
 
-pub struct Resolver<'a> {
-    backends: Vec<&'a dyn PackageBackend>,
+pub struct Resolver {
+    backends: Vec<Box<dyn PackageBackend>>,
     priority: Vec<Source>,
 }
 
-impl<'a> Resolver<'a> {
-    pub fn new(backends: Vec<&'a dyn PackageBackend>) -> Self {
+impl Resolver {
+    pub fn new(backends: Vec<Box<dyn PackageBackend>>) -> Self {
         let priority = vec![Source::Alpm, Source::Aur, Source::Nix];
         Self { backends, priority }
     }

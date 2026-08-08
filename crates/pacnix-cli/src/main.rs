@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
+use pacnix_backend_alpm::AlpmBackend;
+use pacnix_backend_aur::AurBackend;
+use pacnix_backend_nix::NixBackend;
 use pacnix_core::{
-    Candidate, Command, InstalledPackage, Interaction, PackageBackend, Resolver, Source,
-    TargetSpec, TransactionPlan,
+    Candidate, Command, Interaction, PackageBackend, Resolver, Source, TargetSpec,
 };
 
 const VERBS: &[&str] = &["install", "remove", "search", "info", "list", "upgrade", "sync"];
@@ -47,32 +49,12 @@ fn to_targets(args: &[String]) -> Vec<TargetSpec> {
     args.iter().map(|a| TargetSpec { query: a.clone() }).collect()
 }
 
-struct BackendStub {
-    source: Source,
-}
-
-impl PackageBackend for BackendStub {
-    fn name(&self) -> &'static str {
-        "stub"
-    }
-    fn source(&self) -> Source {
-        self.source.clone()
-    }
-    fn search(&self, _query: &str) -> Result<Vec<Candidate>, String> {
-        Ok(Vec::new())
-    }
-    fn installed(&self) -> Result<Vec<InstalledPackage>, String> {
-        Ok(Vec::new())
-    }
-    fn plan_install(&self, _target: &TargetSpec) -> Result<TransactionPlan, String> {
-        Err("backend not implemented".into())
-    }
-    fn plan_remove(&self, _target: &InstalledPackage) -> Result<TransactionPlan, String> {
-        Err("backend not implemented".into())
-    }
-    fn plan_upgrade(&self, _target: &InstalledPackage) -> Result<TransactionPlan, String> {
-        Err("backend not implemented".into())
-    }
+fn default_registry() -> Vec<Box<dyn PackageBackend>> {
+    vec![
+        Box::new(AlpmBackend),
+        Box::new(AurBackend),
+        Box::new(NixBackend),
+    ]
 }
 
 fn main() {
@@ -85,20 +67,11 @@ fn main() {
         }
     };
 
-    let backends: Vec<&dyn PackageBackend> = vec![
-        &BackendStub {
-            source: Source::Alpm,
-        },
-        &BackendStub { source: Source::Aur },
-        &BackendStub { source: Source::Nix },
-    ];
-    {
-        let resolver = Resolver::new(backends);
-        run(&resolver, command);
-    }
+    let resolver = Resolver::new(default_registry());
+    run(&resolver, command);
 }
 
-fn run(resolver: &Resolver<'_>, command: Command) {
+fn run(resolver: &Resolver, command: Command) {
     match command {
         Command::Search(query) => {
             let candidates = resolver.resolve(&query).unwrap_or_default();
@@ -113,14 +86,15 @@ fn run(resolver: &Resolver<'_>, command: Command) {
         other => {
             let interaction = match other {
                 Command::Install(t) => Interaction::SelectCandidate(
-                    t.iter().map(|t| Candidate {
-                        source: Source::Alpm,
-                        provider: "extra".into(),
-                        name: t.query.clone(),
-                        version: None,
-                        description: None,
-                    })
-                    .collect(),
+                    t.iter()
+                        .map(|t| Candidate {
+                            source: Source::Alpm,
+                            provider: "extra".into(),
+                            name: t.query.clone(),
+                            version: None,
+                            description: None,
+                        })
+                        .collect(),
                 ),
                 _ => return,
             };

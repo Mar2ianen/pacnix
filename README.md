@@ -12,19 +12,26 @@ pacman/ALPM + AUR + Nix в одном интерфейсе, с памятью о
 Skeleton / Phase 0. MVP-цель: ALPM/AUR + Nix + rusqlite + unified resolver
 (см. разделы Phase 0–4 в спеке).
 
-## Структура workspace
+## Структура монорепозитория
+
+Набор переиспользуемых крейтов: каждый backend — отдельный крейт, зависящий
+только от `pacnix-core`; CLI — тонкий фронтенд, собирающий registry backend'ов.
 
 ```text
 pacnix/
 ├── crates/
-│   ├── pacnix-core/        core-модели, resolver, storage (SQLite), interaction
-│   ├── pacnix-backend-alpm/
-│   ├── pacnix-backend-aur/
-│   ├── pacnix-backend-nix/
-│   └── pacnix-cli/
+│   ├── pacnix-core/            core-модели, resolver, storage (SQLite), interaction
+│   ├── pacnix-backend-alpm/    ALPM/pacman
+│   ├── pacnix-backend-aur/     AUR
+│   ├── pacnix-backend-nix/     Nix
+│   └── pacnix-cli/             CLI-фронтенд (pacman-style + human-readable)
 ├── docs/
 └── Cargo.toml
 ```
+
+Любой крейт можно использовать как зависимость: `pacnix-backend-*` реализуют
+`pacnix_core::PackageBackend`, `pacnix-core::Resolver` собирает их в единый
+resolver с приоритетами (extra → AUR → nixpkgs).
 
 ## Лицензирование
 
