@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
-use pacnix_core::model::{Candidate, InstalledPackage, Source};
+use pacnix_core::model::{Candidate, InstalledPackage, Provenance, Source};
 use pacnix_core::parsers::parse_pairs;
 
 pub fn parse_search(output: &str) -> Vec<Candidate> {
@@ -32,18 +32,17 @@ pub fn parse_search(output: &str) -> Vec<Candidate> {
     candidates
 }
 
-pub fn parse_installed(output: &str) -> Vec<InstalledPackage> {
+pub fn parse_installed(output: &str, provenance: Provenance) -> Vec<InstalledPackage> {
     parse_pairs(output)
         .into_iter()
-        .map(|(name, version)| { 
-            InstalledPackage {
-                source: Source::Alpm,
-                backend_ref: format!("local/{name}"),
-                name,
-                version,
-                scope: None,
-                installed_at: None,
-            }
+        .map(|(name, version)| InstalledPackage {
+            source: Source::Alpm,
+            backend_ref: format!("local/{name}"),
+            name,
+            version,
+            scope: None,
+            installed_at: None,
+            provenance: provenance.clone(),
         })
         .collect()
 }

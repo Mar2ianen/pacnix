@@ -1,33 +1,13 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
-use std::process::Command;
-
 use pacnix_core::model::{
     Candidate, InstalledPackage, Source, TransactionOperation, TransactionPlan,
 };
-use pacnix_core::parsers::parse_pairs;
 use pacnix_core::PackageBackend;
 
 use crate::rpc::{self, AurPackage};
 
-const PACMAN: &str = "pacman";
-
 pub struct AurBackend;
-
-fn run_pacman(args: &[&str]) -> Result<String, String> {
-    let output = Command::new(PACMAN)
-        .args(args)
-        .output()
-        .map_err(|e| format!("failed to run pacman: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.is_empty() {
-            return Ok(String::new());
-        }
-        return Err(format!("pacman {} failed: {stderr}", args.join(" ")));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
 
 fn search_rpc(query: &str) -> Result<Vec<AurPackage>, String> {
     let url = format!(
@@ -73,18 +53,7 @@ impl PackageBackend for AurBackend {
     }
 
     fn installed(&self) -> Result<Vec<InstalledPackage>, String> {
-        let output = run_pacman(&["-Qm"])?;
-        Ok(parse_pairs(&output)
-            .into_iter()
-            .map(|(name, version)| InstalledPackage {
-                source: Source::Aur,
-                backend_ref: format!("aur/{name}"),
-                name,
-                version,
-                scope: None,
-                installed_at: None,
-            })
-            .collect())
+        Ok(Vec::new())
     }
 
     fn plan_install(&self, target: &Candidate) -> Result<TransactionPlan, String> {

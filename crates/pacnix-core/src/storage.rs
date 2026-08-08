@@ -23,6 +23,7 @@ impl Storage {
                 backend_ref    TEXT NOT NULL,
                 version        TEXT,
                 scope          TEXT,
+                provenance     TEXT,
                 installed_at   INTEGER,
                 last_seen_at   INTEGER NOT NULL,
                 UNIQUE (backend, backend_ref)
@@ -34,6 +35,11 @@ impl Storage {
              );",
         )
         .map_err(|e| e.to_string())?;
+        match conn.execute_batch("ALTER TABLE installed_instances ADD COLUMN provenance TEXT") {
+            Ok(()) => {}
+            Err(e) if e.to_string().contains("duplicate column name") => {}
+            Err(e) => return Err(e.to_string()),
+        }
         Ok(Self { conn })
     }
 
@@ -87,18 +93,20 @@ impl Storage {
             .unwrap_or(0);
         tx.execute(
             "INSERT INTO installed_instances
-             (package_id, backend, backend_ref, version, scope, installed_at, last_seen_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             (package_id, backend, backend_ref, version, scope, provenance, installed_at, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(backend, backend_ref) DO UPDATE SET
                 version = excluded.version,
                 scope = excluded.scope,
+                provenance = excluded.provenance,
                 last_seen_at = excluded.last_seen_at",
             params![
                 package_id,
-                pkg.source_name(),
+                pkg.source.as_str(),
                 pkg.backend_ref,
                 pkg.version,
                 pkg.scope,
+                provenance_str(&pkg.provenance),
                 pkg.installed_at,
                 now
             ],
@@ -108,13 +116,10 @@ impl Storage {
     }
 }
 
-impl InstalledPackage {
-    fn source_name(&self) -> &'static str {
-        match self.source {
-            crate::Source::Alpm => "alpm",
-            crate::Source::Aur => "aur",
-            crate::Source::Nix => "nix",
-        }
+fn provenance_str(provenance: &crate::model::Provenance) -> &'static str {
+    match provenance {
+        crate::model::Provenance::Native => "native",
+        crate::model::Provenance::ForeignUnknown => "foreign-unknown",
     }
 }
 
@@ -134,6 +139,26 @@ mod tests {
     }
 
     #[test]
+    fn alias_roundtrip() {
+        let storage = tmp_db();
+        storage
+            .remember_alias("firefox", "alpm", "extra/firefox")
+            .unwrap();
+        assert_eq!(
+            storage.alias("firefox").unwrap(),
+            Some(("alpm".to_string(), "extra/firefox".to_string()))
+        );
+        storage
+            .remember_alias("firefox", "aur", "aur/firefox-bin")
+            .unwrap();
+        assert_eq!(
+            storage.alias("firefox").unwrap(),
+            Some(("aur".to_string(), "aur/firefox-bin".to_string()))
+        );
+        assert_eq!(storage.alias("unknown").unwrap(), None);
+    }
+
+    #[test]
     fn upsert_instance_is_idempotent() {
         let storage = tmp_db();
         let pkg = InstalledPackage {
@@ -143,6 +168,7 @@ mod tests {
             version: Some("1.0-1".into()),
             scope: None,
             installed_at: Some(1),
+            provenance: crate::Provenance::Native,
         };
         storage.upsert_instance(&pkg).unwrap();
         let updated = InstalledPackage {

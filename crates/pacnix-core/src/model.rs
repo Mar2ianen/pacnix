@@ -7,6 +7,16 @@ pub enum Source {
     Nix,
 }
 
+impl Source {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Source::Alpm => "alpm",
+            Source::Aur => "aur",
+            Source::Nix => "nix",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub source: Source,
@@ -23,6 +33,12 @@ impl Candidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Provenance {
+    Native,
+    ForeignUnknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledPackage {
     pub source: Source,
     pub backend_ref: String,
@@ -30,6 +46,7 @@ pub struct InstalledPackage {
     pub version: Option<String>,
     pub scope: Option<String>,
     pub installed_at: Option<i64>,
+    pub provenance: Provenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -123,7 +123,11 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
                 }
             }
             for pkg in &found {
-                println!("{} {}", pkg.name, pkg.version.as_deref().unwrap_or("-"));
+                let mark = match pkg.provenance {
+                    pacnix_core::Provenance::Native => "",
+                    pacnix_core::Provenance::ForeignUnknown => " (foreign)",
+                };
+                println!("{} {}{}", pkg.name, pkg.version.as_deref().unwrap_or("-"), mark);
             }
         }
         Command::Install(targets) => {
@@ -138,7 +142,8 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command) {
                 }
                 if result.candidates.len() == 1 {
                     let cand = &result.candidates[0];
-                    if let Err(e) = storage.remember_alias(&target.query, &cand.provider, &cand.name) {
+                    let backend_ref = format!("{}/{}", cand.provider, cand.name);
+                    if let Err(e) = storage.remember_alias(&target.query, cand.source.as_str(), &backend_ref) {
                         eprintln!("pacnix: storage: {e}");
                     }
                     let backend = select_backend(resolver, cand);
