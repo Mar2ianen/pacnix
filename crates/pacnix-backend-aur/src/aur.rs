@@ -210,44 +210,20 @@ fn dep_name(dep: &str) -> String {
         .to_string()
 }
 
-/// Compares Arch package versions via the `vercmp` binary (from
-/// pacman-contrib): true when `candidate` is newer than `installed`
-/// (vercmp prints a negative value in that case).
-fn version_newer(installed: &str, candidate: &str) -> Result<bool, String> {
-    let output = std::process::Command::new("vercmp")
-        .args([installed, candidate])
-        .output()
-        .map_err(|e| format!("failed to run vercmp (is pacman-contrib installed?): {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "vercmp failed for {installed} vs {candidate} (status {})",
-            output.status
-        ));
-    }
-    let result = String::from_utf8_lossy(&output.stdout);
-    let value: i64 = result.trim().parse().map_err(|e| {
-        format!("vercmp printed unexpected output {result:?} for {installed} vs {candidate}: {e}")
-    })?;
-    Ok(value < 0)
-}
-
 /// Keeps packages whose version is newer than what `installed` reports,
 /// skipping names pacman does not know (e.g. packages removed by hand).
 fn filter_outdated(
     packages: Vec<AurPackage>,
     installed: &dyn Fn(&str) -> Option<String>,
-    newer: &dyn Fn(&str, &str) -> Result<bool, String>,
-) -> Result<Vec<AurPackage>, String> {
-    let mut outdated = Vec::new();
-    for pkg in packages {
-        if let Some(current) = installed(&pkg.name) {
-            let latest = pkg.version.as_deref().unwrap_or_default();
-            if newer(&current, latest)? {
-                outdated.push(pkg);
-            }
-        }
-    }
-    Ok(outdated)
+) -> Vec<AurPackage> {
+    packages
+        .into_iter()
+        .filter(|pkg| {
+            installed(&pkg.name).is_some_and(|current| {
+                pacnix_core::vercmp(&current, pkg.version.as_deref().unwrap_or_default()) < 0
+            })
+        })
+        .collect()
 }
 
 /// All build-relevant dependency names of a package: runtime `depends`,
@@ -530,16 +506,12 @@ impl PackageBackend for AurBackend {
         for chunk in installed.chunks(50) {
             found.extend(rpc::info_by_name(chunk)?);
         }
-        let outdated = filter_outdated(
-            found,
-            &|name| {
-                installed_desc(name)
-                    .ok()
-                    .flatten()
-                    .and_then(|(_, version, _)| version)
-            },
-            &version_newer,
-        )?;
+        let outdated = filter_outdated(found, &|name| {
+            installed_desc(name)
+                .ok()
+                .flatten()
+                .and_then(|(_, version, _)| version)
+        });
         Ok(rpc::to_candidates(outdated))
     }
 
@@ -979,29 +951,7 @@ makedepends_x86_64 = cmake
             "equal" => Some("1.0-1".to_string()),
             _ => None,
         };
-        let outdated =
-            filter_outdated(table, &installed, &|current, latest| Ok(latest > current)).unwrap();
+        let outdated = filter_outdated(table, &installed);
         assert_eq!(names(&outdated), vec!["newer"]);
-    }
-
-    #[test]
-    fn filter_outdated_propagates_compare_errors() {
-        let err = filter_outdated(vec![pkg("x", &[])], &|_| Some("1".to_string()), &|_, _| {
-            Err("vercmp exploded".to_string())
-        })
-        .unwrap_err();
-        assert!(err.contains("vercmp"), "got: {err}");
-    }
-
-    #[test]
-    fn vercmp_detects_newer_versions() {
-        assert!(version_newer("0.4.0-1", "0.5.0-1").unwrap());
-        assert!(version_newer("1.0-1", "1.0-2").unwrap());
-        assert!(!version_newer("0.5.0-1", "0.4.0-1").unwrap());
-        assert!(!version_newer("0.4.0-1", "0.4.0-1").unwrap());
-        assert!(
-            version_newer("1.0.3-1", "1.0.10-1").unwrap(),
-            "10 > 3 numerically"
-        );
     }
 }

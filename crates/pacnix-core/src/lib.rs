@@ -8,6 +8,7 @@ pub mod model;
 pub mod parsers;
 pub mod resolver;
 pub mod storage;
+pub mod version;
 
 pub use backend::{ExecutionContext, PackageBackend, Privilege, UpgradeImpact, UpgradeImpactEntry};
 pub use command::Command;
@@ -19,3 +20,4 @@ pub use model::{
 };
 pub use resolver::{BackendError, RankedCandidate, Reason, ResolutionDecision, Resolver};
 pub use storage::Storage;
+pub use version::vercmp;
