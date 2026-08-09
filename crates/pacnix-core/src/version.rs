@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
-/// Compares two Arch package version strings the way pacman's `vercmp` does.
-/// Returns -1, 0 or 1 when `a` is older than, equal to, or newer than `b`.
+/// Compares valid ALPM package version strings according to the
+/// alpm-pkgver comparison rules. Returns -1, 0 or 1 when `a` is older
+/// than, equal to, or newer than `b`.
 ///
 /// Pure Rust port of alpm's version comparison (epoch/version/release
 /// splitting plus the segment algorithm from the alpm-pkgver specification),
-/// so pacnix never needs the pacman-contrib `vercmp` binary.
+/// so pacnix never needs the pacman-contrib `vercmp` binary. Non-ASCII
+/// input is out of contract: valid `pkgver` values are ASCII only.
 pub fn vercmp(a: &str, b: &str) -> i8 {
     if a == b {
         return 0;
@@ -143,22 +145,7 @@ fn cmp_sub(a: &Sub, b: &Sub) -> i8 {
         }
         (true, false) => 1,
         (false, true) => -1,
-        (false, false) => {
-            for (ca, cb) in a.text.bytes().zip(b.text.bytes()) {
-                let ca = ca.to_ascii_lowercase();
-                let cb = cb.to_ascii_lowercase();
-                match ca.cmp(&cb) {
-                    std::cmp::Ordering::Greater => return 1,
-                    std::cmp::Ordering::Less => return -1,
-                    std::cmp::Ordering::Equal => {}
-                }
-            }
-            match a.text.len().cmp(&b.text.len()) {
-                std::cmp::Ordering::Greater => 1,
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-            }
-        }
+        (false, false) => a.text.as_bytes().cmp(b.text.as_bytes()) as i8,
     }
 }
 
@@ -308,9 +295,9 @@ mod tests {
     }
 
     #[test]
-    fn ignores_case_and_leading_zeros() {
+    fn alpha_ordering_is_bytewise_and_leading_zeros_ignored() {
         check(&[
-            ("1.0Alpha", "1.0alpha", 0),
+            ("1.0Alpha", "1.0alpha", -1),
             ("1.0beta", "1.0Alpha", 1),
             ("1.05", "1.5", 0),
             ("1.05", "1.5.1", -1),
@@ -322,6 +309,9 @@ mod tests {
             ("1a", "1-2", -1),
             ("a1", "a", 1),
             ("a", "a1", -1),
+            ("A", "a", -1),
+            ("a", "A", 1),
+            ("RC1", "rc1", -1),
         ]);
     }
 
@@ -398,6 +388,12 @@ mod tests {
             "1.foo.".into(),
             "1-2".into(),
             "1.0ab".into(),
+            "1.0Alpha".into(),
+            "1.0alpha".into(),
+            "A".into(),
+            "a".into(),
+            "RC1".into(),
+            "rc1".into(),
         ];
         let local = std::path::Path::new("/var/lib/pacman/local");
         if let Ok(entries) = std::fs::read_dir(local) {
@@ -425,9 +421,7 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             *state >> 33
         };
-        for _ in 0..10_000 {
-            let a = &versions[(next(&mut state) % versions.len() as u64) as usize];
-            let b = &versions[(next(&mut state) % versions.len() as u64) as usize];
+        let check = |a: &str, b: &str| {
             let output = std::process::Command::new("vercmp")
                 .args([a, b])
                 .output()
@@ -439,6 +433,16 @@ mod tests {
                 .expect("vercmp must print -1/0/1");
             let got = vercmp(a, b) as i64;
             assert_eq!(got, expected, "{a} vs {b}");
+        };
+        for a in &versions {
+            for b in &versions {
+                check(a, b);
+            }
+        }
+        for _ in 0..10_000 {
+            let a = &versions[(next(&mut state) % versions.len() as u64) as usize];
+            let b = &versions[(next(&mut state) % versions.len() as u64) as usize];
+            check(a, b);
         }
     }
 }
