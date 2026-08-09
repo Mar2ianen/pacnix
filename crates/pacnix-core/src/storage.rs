@@ -343,6 +343,25 @@ impl Storage {
             .map_err(|e| e.to_string())
     }
 
+    pub fn aur_installed_names(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT package_name FROM install_receipts
+                 WHERE source = 'aur'
+                 ORDER BY package_name",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut names = Vec::new();
+        for row in rows {
+            names.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(names)
+    }
+
     pub fn known_source_for(
         &self,
         package_name: &str,
@@ -694,6 +713,40 @@ mod tests {
             None,
             "version must still be checked when time is unknown"
         );
+    }
+
+    #[test]
+    fn aur_installed_names_lists_only_aur_sources() {
+        let storage = tmp_db();
+        for (name, source, backend) in [
+            ("foo", "aur", "aur"),
+            ("bar", "aur", "aur"),
+            ("repo-pkg", "alpm", "alpm"),
+        ] {
+            let receipt = crate::InstallReceipt {
+                package_name: name.into(),
+                installed_backend: backend.into(),
+                installed_backend_ref: format!("{backend}/{name}"),
+                source: source.into(),
+                source_ref: format!("{source}/{name}"),
+                version: Some("1.0-1".into()),
+                installed_at: 1,
+            };
+            storage.record_receipt(&receipt).unwrap();
+        }
+        storage
+            .record_receipt(&crate::InstallReceipt {
+                package_name: "foo".into(),
+                installed_backend: "alpm".into(),
+                installed_backend_ref: "alpm/foo".into(),
+                source: "aur".into(),
+                source_ref: "aur/foo-bin".into(),
+                version: Some("2.0-1".into()),
+                installed_at: 2,
+            })
+            .unwrap();
+        let names = storage.aur_installed_names().unwrap();
+        assert_eq!(names, vec!["bar", "foo"]);
     }
 
     #[test]

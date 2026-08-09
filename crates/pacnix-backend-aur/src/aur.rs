@@ -210,6 +210,46 @@ fn dep_name(dep: &str) -> String {
         .to_string()
 }
 
+/// Compares Arch package versions via the `vercmp` binary (from
+/// pacman-contrib): true when `candidate` is newer than `installed`
+/// (vercmp prints a negative value in that case).
+fn version_newer(installed: &str, candidate: &str) -> Result<bool, String> {
+    let output = std::process::Command::new("vercmp")
+        .args([installed, candidate])
+        .output()
+        .map_err(|e| format!("failed to run vercmp (is pacman-contrib installed?): {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "vercmp failed for {installed} vs {candidate} (status {})",
+            output.status
+        ));
+    }
+    let result = String::from_utf8_lossy(&output.stdout);
+    let value: i64 = result.trim().parse().map_err(|e| {
+        format!("vercmp printed unexpected output {result:?} for {installed} vs {candidate}: {e}")
+    })?;
+    Ok(value < 0)
+}
+
+/// Keeps packages whose version is newer than what `installed` reports,
+/// skipping names pacman does not know (e.g. packages removed by hand).
+fn filter_outdated(
+    packages: Vec<AurPackage>,
+    installed: &dyn Fn(&str) -> Option<String>,
+    newer: &dyn Fn(&str, &str) -> Result<bool, String>,
+) -> Result<Vec<AurPackage>, String> {
+    let mut outdated = Vec::new();
+    for pkg in packages {
+        if let Some(current) = installed(&pkg.name) {
+            let latest = pkg.version.as_deref().unwrap_or_default();
+            if newer(&current, latest)? {
+                outdated.push(pkg);
+            }
+        }
+    }
+    Ok(outdated)
+}
+
 /// All build-relevant dependency names of a package: runtime `depends`,
 /// `makedepends` and `checkdepends`, deduplicated and constraint-stripped.
 fn dep_names_of(pkg: &AurPackage) -> Vec<String> {
@@ -228,13 +268,13 @@ fn dep_names_of(pkg: &AurPackage) -> Vec<String> {
     deps
 }
 
-/// Expands the AUR-only dependency graph of `top`, deps-first (the target
-/// itself is last). `info(name)` returns the AUR package or `Ok(None)` when
-/// the name is a repository package (or absent); `installed(name)` reports
-/// whether pacman already satisfies it. A dependency cycle fails the
-/// expansion instead of looping.
+/// Expands the AUR-only dependency graph of `roots`, deps-first (every root
+/// itself comes last, roots in the order given). `info(name)` returns the AUR
+/// package or `Ok(None)` when the name is a repository package (or absent);
+/// `installed(name)` reports whether pacman already satisfies it. A dependency
+/// cycle fails the expansion instead of looping.
 fn expand_chain(
-    top: &str,
+    roots: &[String],
     info: &dyn Fn(&str) -> Result<Option<AurPackage>, String>,
     installed: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<AurPackage>, String> {
@@ -245,7 +285,11 @@ fn expand_chain(
     }
     let mut order: Vec<AurPackage> = Vec::new();
     let mut done: HashSet<String> = HashSet::new();
-    let mut stack: Vec<Frame> = vec![Frame::Expand(top.to_string(), Vec::new())];
+    let mut stack: Vec<Frame> = roots
+        .iter()
+        .rev()
+        .map(|root| Frame::Expand(root.clone(), Vec::new()))
+        .collect();
     while let Some(frame) = stack.pop() {
         match frame {
             Frame::Emit(pkg) => order.push(pkg),
@@ -411,6 +455,30 @@ fn parse_desc_fields(desc: &str) -> (Option<String>, Option<String>, Option<i64>
     (name, version, installed_at)
 }
 
+impl AurBackend {
+    /// Shared walk for installs and upgrades: expands the AUR-only graph of
+    /// `roots` and plans each node in dependency order.
+    fn expand_and_plan(&self, roots: &[String]) -> Result<Vec<TransactionPlan>, String> {
+        let chain = expand_chain(
+            roots,
+            &|name| {
+                rpc::info_by_name(&[name.to_string()])
+                    .map(|pkgs| pkgs.into_iter().find(|p| p.name == name))
+            },
+            &|name| installed_desc(name).ok().flatten().is_some(),
+        )?;
+        if chain.is_empty() {
+            return Err("not found in AUR".into());
+        }
+        let mut plans = Vec::new();
+        for pkg in chain {
+            let candidate = rpc::to_candidates(vec![pkg]).remove(0);
+            plans.push(self.plan_install(&candidate)?);
+        }
+        Ok(plans)
+    }
+}
+
 impl PackageBackend for AurBackend {
     fn name(&self) -> &'static str {
         "aur"
@@ -457,24 +525,35 @@ impl PackageBackend for AurBackend {
         })
     }
 
-    fn plan_install_chain(&self, target: &Candidate) -> Result<Vec<TransactionPlan>, String> {
-        let chain = expand_chain(
-            &target.name,
+    fn outdated(&self, installed: &[String]) -> Result<Vec<Candidate>, String> {
+        let mut found: Vec<AurPackage> = Vec::new();
+        for chunk in installed.chunks(50) {
+            found.extend(rpc::info_by_name(chunk)?);
+        }
+        let outdated = filter_outdated(
+            found,
             &|name| {
-                rpc::info_by_name(&[name.to_string()])
-                    .map(|pkgs| pkgs.into_iter().find(|p| p.name == name))
+                installed_desc(name)
+                    .ok()
+                    .flatten()
+                    .and_then(|(_, version, _)| version)
             },
-            &|name| installed_desc(name).ok().flatten().is_some(),
+            &version_newer,
         )?;
-        if chain.is_empty() {
-            return Err(format!("{}: not found in AUR", target.name));
-        }
-        let mut plans = Vec::new();
-        for pkg in chain {
-            let candidate = rpc::to_candidates(vec![pkg]).remove(0);
-            plans.push(self.plan_install(&candidate)?);
-        }
-        Ok(plans)
+        Ok(rpc::to_candidates(outdated))
+    }
+
+    fn plan_upgrade_chain(&self, targets: &[Candidate]) -> Result<Vec<TransactionPlan>, String> {
+        let roots: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
+        self.expand_and_plan(&roots)
+    }
+
+    fn plan_install_chain(&self, target: &Candidate) -> Result<Vec<TransactionPlan>, String> {
+        self.expand_and_plan(std::slice::from_ref(&target.name))
+    }
+
+    fn plan_upgrade_all(&self) -> Result<TransactionPlan, String> {
+        Err("aur: upgrade all not implemented yet".into())
     }
 
     fn plan_remove(&self, target: &InstalledPackage) -> Result<TransactionPlan, String> {
@@ -497,10 +576,6 @@ impl PackageBackend for AurBackend {
             }],
             requires_privilege: true,
         })
-    }
-
-    fn plan_upgrade_all(&self) -> Result<TransactionPlan, String> {
-        Err("aur: upgrade all not implemented yet".into())
     }
 
     fn receipt_instances(
@@ -780,7 +855,7 @@ makedepends_x86_64 = cmake
                 .ok_or_else(|| format!("no info for {name}"))
                 .map(Some)
         };
-        let chain = expand_chain("a", &find, &|_| false).unwrap();
+        let chain = expand_chain(&["a".to_string()], &find, &|_| false).unwrap();
         assert_eq!(names(&chain), vec!["c", "b", "a"]);
     }
 
@@ -800,7 +875,7 @@ makedepends_x86_64 = cmake
                 .ok_or_else(|| format!("no info for {name}"))
                 .map(Some)
         };
-        let chain = expand_chain("a", &find, &|_| false).unwrap();
+        let chain = expand_chain(&["a".to_string()], &find, &|_| false).unwrap();
         let order = names(&chain);
         assert_eq!(order.last().unwrap(), "a", "target must be installed last");
         assert_eq!(order.iter().filter(|n| n.as_str() == "d").count(), 1);
@@ -818,7 +893,7 @@ makedepends_x86_64 = cmake
                 .ok_or_else(|| format!("no info for {name}"))
                 .map(Some)
         };
-        let err = expand_chain("a", &find, &|_| false).unwrap_err();
+        let err = expand_chain(&["a".to_string()], &find, &|_| false).unwrap_err();
         assert!(err.contains("a -> b -> a"), "got: {err}");
     }
 
@@ -833,13 +908,18 @@ makedepends_x86_64 = cmake
                 .ok_or_else(|| format!("no info for {name}"))
                 .map(Some)
         };
-        let chain = expand_chain("a", &find, &|name| name == "b").unwrap();
+        let chain = expand_chain(&["a".to_string()], &find, &|name| name == "b").unwrap();
         assert_eq!(names(&chain), vec!["c", "a"]);
     }
 
     #[test]
     fn expand_chain_propagates_network_errors() {
-        let err = expand_chain("a", &|_| Err("network down".to_string()), &|_| false).unwrap_err();
+        let err = expand_chain(
+            &["a".to_string()],
+            &|_| Err("network down".to_string()),
+            &|_| false,
+        )
+        .unwrap_err();
         assert!(err.contains("network down"), "got: {err}");
     }
 
@@ -854,8 +934,74 @@ makedepends_x86_64 = cmake
                 .ok_or_else(|| format!("no info for {name}"))
                 .map(Some)
         };
-        let chain = expand_chain("a", &find, &|_| false).unwrap();
+        let chain = expand_chain(&["a".to_string()], &find, &|_| false).unwrap();
         assert_eq!(chain.last().unwrap().name, "a");
         assert_eq!(chain[0].name, "b");
+    }
+
+    #[test]
+    fn expand_chain_multi_root_shares_deps() {
+        let table = [pkg("a", &["b"]), pkg("c", &["b"]), pkg("b", &[])];
+        let find = |name: &str| {
+            table
+                .iter()
+                .find(|p| p.name == name)
+                .cloned()
+                .ok_or_else(|| format!("no info for {name}"))
+                .map(Some)
+        };
+        let roots = ["a".to_string(), "c".to_string()];
+        let chain = expand_chain(&roots, &find, &|_| false).unwrap();
+        let order = names(&chain);
+        assert_eq!(
+            order.iter().filter(|n| n.as_str() == "b").count(),
+            1,
+            "shared dep must be planned exactly once"
+        );
+        let pos_b = order.iter().position(|n| n == "b").unwrap();
+        let pos_a = order.iter().position(|n| n == "a").unwrap();
+        let pos_c = order.iter().position(|n| n == "c").unwrap();
+        assert!(
+            pos_b < pos_a && pos_b < pos_c,
+            "dep before both roots: {order:?}"
+        );
+    }
+
+    #[test]
+    fn filter_outdated_keeps_only_newer_versions() {
+        let mut newest = pkg("newer", &[]);
+        newest.version = Some("2.0-1".to_string());
+        let equal = pkg("equal", &[]);
+        let unknown = pkg("unknown", &[]);
+        let table = vec![newest, equal, unknown];
+        let installed = |name: &str| match name {
+            "newer" => Some("1.0-1".to_string()),
+            "equal" => Some("1.0-1".to_string()),
+            _ => None,
+        };
+        let outdated =
+            filter_outdated(table, &installed, &|current, latest| Ok(latest > current)).unwrap();
+        assert_eq!(names(&outdated), vec!["newer"]);
+    }
+
+    #[test]
+    fn filter_outdated_propagates_compare_errors() {
+        let err = filter_outdated(vec![pkg("x", &[])], &|_| Some("1".to_string()), &|_, _| {
+            Err("vercmp exploded".to_string())
+        })
+        .unwrap_err();
+        assert!(err.contains("vercmp"), "got: {err}");
+    }
+
+    #[test]
+    fn vercmp_detects_newer_versions() {
+        assert!(version_newer("0.4.0-1", "0.5.0-1").unwrap());
+        assert!(version_newer("1.0-1", "1.0-2").unwrap());
+        assert!(!version_newer("0.5.0-1", "0.4.0-1").unwrap());
+        assert!(!version_newer("0.4.0-1", "0.4.0-1").unwrap());
+        assert!(
+            version_newer("1.0.3-1", "1.0.10-1").unwrap(),
+            "10 > 3 numerically"
+        );
     }
 }

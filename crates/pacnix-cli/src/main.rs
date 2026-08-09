@@ -517,17 +517,36 @@ fn run_remove(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], op
 
 struct PlannedUpgrade<'a> {
     backend: &'a dyn PackageBackend,
-    plan: TransactionPlan,
+    plans: Vec<TransactionPlan>,
 }
 
 fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
     println!(":: Checking for updates...");
     let mut planned: Vec<PlannedUpgrade> = Vec::new();
     for backend in resolver.backends() {
+        if backend.source() == Source::Aur {
+            match storage.aur_installed_names() {
+                Ok(names) if names.is_empty() => {}
+                Ok(names) => match backend.outdated(&names) {
+                    Ok(candidates) if candidates.is_empty() => {}
+                    Ok(candidates) => match backend.plan_upgrade_chain(&candidates) {
+                        Ok(plans) if plans.is_empty() => {}
+                        Ok(plans) => planned.push(PlannedUpgrade {
+                            backend: backend.as_ref(),
+                            plans,
+                        }),
+                        Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
+                    },
+                    Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
+                },
+                Err(e) => eprintln!("pacnix: storage: {e}"),
+            }
+            continue;
+        }
         match backend.plan_upgrade_all() {
             Ok(plan) => planned.push(PlannedUpgrade {
                 backend: backend.as_ref(),
-                plan,
+                plans: vec![plan],
             }),
             Err(e) => eprintln!("pacnix: {}: {}", backend.name(), e),
         }
@@ -548,7 +567,11 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
             return;
         }
     };
-    if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege(&privilege) {
+    if planned
+        .iter()
+        .any(|p| p.plans.iter().any(|plan| plan.requires_privilege))
+        && !acquire_privilege(&privilege)
+    {
         return;
     }
     if !confirm(opts, ":: Proceed with upgrade? [Y/n]") {
@@ -556,8 +579,10 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
         return;
     }
     println!(":: Upgrading...");
-    let pairs: Vec<(&dyn PackageBackend, &TransactionPlan)> =
-        planned.iter().map(|p| (p.backend, &p.plan)).collect();
+    let pairs: Vec<(&dyn PackageBackend, &TransactionPlan)> = planned
+        .iter()
+        .flat_map(|p| p.plans.iter().map(|plan| (p.backend, plan)))
+        .collect();
     let reports = execute_plans(storage, &pairs, &privilege);
     report_outcomes(&reports);
     if reports.iter().all(|r| r.error.is_none()) {
@@ -787,8 +812,13 @@ fn print_upgrade_summary(planned: &[PlannedUpgrade]) {
     let mut deltas: Vec<Option<i64>> = Vec::new();
     let mut all_available = true;
     for item in planned {
-        println!("  {} via {}", item.plan.name, item.backend.name());
-        match item.backend.upgrade_impact_estimate(&item.plan) {
+        for plan in &item.plans {
+            println!("  {} via {}", plan.name, item.backend.name());
+        }
+        match item
+            .backend
+            .upgrade_impact_estimate(item.plans.first().expect("plans is non-empty"))
+        {
             Ok(Some(impact)) => {
                 for e in &impact.entries {
                     match (e.old_size, e.new_size) {

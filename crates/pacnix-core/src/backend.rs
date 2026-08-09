@@ -62,6 +62,21 @@ pub trait PackageBackend: Send + Sync {
     }
     fn plan_remove(&self, target: &InstalledPackage) -> Result<TransactionPlan, String>;
     fn plan_upgrade(&self, target: &InstalledPackage) -> Result<TransactionPlan, String>;
+    /// Candidates among `installed` with a newer version available. Defaults
+    /// to none: alpm covers the repos through `plan_upgrade_all`, only
+    /// backends with an external version source (aur) override this.
+    fn outdated(&self, _installed: &[String]) -> Result<Vec<Candidate>, String> {
+        Ok(Vec::new())
+    }
+    /// Plans upgrades of the given targets together, deps-first and without
+    /// duplicates. Default: one plan per target via `plan_install_chain`.
+    fn plan_upgrade_chain(&self, targets: &[Candidate]) -> Result<Vec<TransactionPlan>, String> {
+        let mut plans = Vec::new();
+        for target in targets {
+            plans.extend(self.plan_install_chain(target)?);
+        }
+        Ok(plans)
+    }
     fn plan_upgrade_all(&self) -> Result<TransactionPlan, String>;
     fn install_size_estimate(&self, _target: &Candidate) -> Result<Option<u64>, String> {
         Ok(None)
