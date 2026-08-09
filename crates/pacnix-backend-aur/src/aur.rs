@@ -116,7 +116,62 @@ fn fetch_snapshot(
     Ok(dir)
 }
 
-fn build_dependencies(dir: &std::path::Path) -> Result<Vec<String>, String> {
+fn current_arch() -> String {
+    std::process::Command::new("uname")
+        .arg("-m")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "x86_64".to_string())
+}
+
+fn parse_srcinfo_deps(srcinfo: &str, arch: &str, package: &str) -> Vec<String> {
+    let mut deps: Vec<String> = Vec::new();
+    let mut current_package: Option<&str> = None;
+    for line in srcinfo.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("pkgname = ") {
+            current_package = Some(rest.trim());
+            continue;
+        }
+        for kind in ["depends", "makedepends", "checkdepends"] {
+            let Some(rest) = line.strip_prefix(kind) else {
+                continue;
+            };
+            let rest = match rest.strip_prefix(&format!("_{arch}")) {
+                Some(r) => r,
+                None => rest,
+            };
+            let Some(rest) = rest.strip_prefix(" = ") else {
+                continue;
+            };
+            let name = rest
+                .split(['>', '<', '=', '!'])
+                .next()
+                .unwrap_or(rest)
+                .trim();
+            if name.is_empty() {
+                continue;
+            }
+            let in_section = match current_package {
+                None => true,
+                Some(pkg) => pkg == package,
+            };
+            if !in_section {
+                continue;
+            }
+            if !deps.iter().any(|d| d == name) {
+                deps.push(name.to_string());
+            }
+        }
+    }
+    deps
+}
+
+fn build_dependencies(dir: &std::path::Path, package: &str) -> Result<Vec<String>, String> {
     let output = std::process::Command::new("makepkg")
         .args(["--printsrcinfo"])
         .current_dir(dir)
@@ -129,24 +184,7 @@ fn build_dependencies(dir: &std::path::Path) -> Result<Vec<String>, String> {
         ));
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut deps: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed
-            .strip_prefix("depends = ")
-            .or_else(|| trimmed.strip_prefix("makedepends = "))
-        {
-            let name = rest
-                .split(['>', '<', '=', '!'])
-                .next()
-                .unwrap_or(rest)
-                .trim();
-            if !name.is_empty() && !deps.iter().any(|d| d == name) {
-                deps.push(name.to_string());
-            }
-        }
-    }
-    Ok(deps)
+    Ok(parse_srcinfo_deps(&text, &current_arch(), package))
 }
 
 fn build_package(package: &str, dir: &std::path::Path) -> Result<(), String> {
@@ -163,7 +201,7 @@ fn build_package(package: &str, dir: &std::path::Path) -> Result<(), String> {
 
 fn artifact_pkgname(path: &std::path::Path) -> Result<Option<String>, String> {
     let output = std::process::Command::new("tar")
-        .args(["-xzf", "-O"])
+        .args(["-xOf"])
         .arg(path)
         .arg(".PKGINFO")
         .output()
@@ -175,11 +213,11 @@ fn artifact_pkgname(path: &std::path::Path) -> Result<Option<String>, String> {
     Ok(text
         .lines()
         .find_map(|line| line.trim().strip_prefix("pkgname = "))
-        .map(|name| name.to_string()))
+        .map(|name| name.trim().to_string()))
 }
 
 fn built_artifact(dir: &std::path::Path, package: &str) -> Result<std::path::PathBuf, String> {
-    let candidates: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+    for path in std::fs::read_dir(dir)
         .map_err(|e| e.to_string())?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
@@ -189,16 +227,12 @@ fn built_artifact(dir: &std::path::Path, package: &str) -> Result<std::path::Pat
                 || name.ends_with(".pkg.tar.xz")
                 || name.ends_with(".pkg.tar")
         })
-        .collect();
-    for path in &candidates {
-        if artifact_pkgname(path)? == Some(package.to_string()) {
-            return Ok(path.clone());
+    {
+        if artifact_pkgname(&path)? == Some(package.to_string()) {
+            return Ok(path);
         }
     }
-    candidates
-        .into_iter()
-        .max()
-        .ok_or_else(|| "no built package artifact found".into())
+    Err(format!("no built artifact for requested package {package}"))
 }
 
 fn search_rpc(query: &str) -> Result<Vec<AurPackage>, String> {
@@ -393,7 +427,7 @@ impl PackageBackend for AurBackend {
                         "{package}: PKGBUILD not fetched yet; install AUR via pacnix install"
                     ));
                 }
-                let deps = build_dependencies(&dir)?;
+                let deps = build_dependencies(&dir, package)?;
                 if deps.is_empty() {
                     return Ok(());
                 }
@@ -533,5 +567,68 @@ mod tests {
         assert_eq!(urlencode("hiddify"), "hiddify");
         assert_eq!(urlencode("foo bar"), "foo%20bar");
         assert_eq!(urlencode("foo/bar"), "foo%2Fbar");
+    }
+
+    #[test]
+    fn srcinfo_includes_dep_kinds_and_arch_variants() {
+        let srcinfo = "\
+pkgbase = nx
+pkgver = 3.5.2
+pkgrel = 1
+depends = zlib
+makedepends = gcc
+makedepends_x86_64 = extra-tool
+checkdepends = python
+checkdepends_x86_64 = ctest
+pkgname = nx
+depends = any-pkg
+pkgname = nxproxy
+depends = nx
+";
+        let deps = parse_srcinfo_deps(srcinfo, "x86_64", "nxproxy");
+        for expected in ["zlib", "gcc", "extra-tool", "python", "ctest", "nx"] {
+            assert!(
+                deps.iter().any(|d| d == expected),
+                "{expected} must be collected, got {deps:?}"
+            );
+        }
+        assert!(
+            !deps.contains(&"any-pkg".to_string()),
+            "deps of another split package section must be excluded"
+        );
+        assert_eq!(
+            deps.iter().filter(|d| d.as_str() == "nx").count(),
+            1,
+            "nx must appear once (dedup)"
+        );
+    }
+
+    #[test]
+    fn srcinfo_dedupes_across_sections() {
+        let srcinfo = "\
+pkgname = a
+depends = libz
+pkgname = b
+depends = libz
+makedepends_x86_64 = cmake
+";
+        let deps = parse_srcinfo_deps(srcinfo, "x86_64", "b");
+        assert_eq!(deps.iter().filter(|d| d.as_str() == "libz").count(), 1);
+    }
+
+    #[test]
+    fn built_artifact_requires_matching_pkgname() {
+        let dir = std::env::temp_dir().join(format!("pacnix-aur-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let artifact = dir.join("nx-3.5.2-1-x86_64.pkg.tar");
+        if artifact.exists() {
+            let _ = std::fs::remove_file(&artifact);
+        }
+        std::fs::write(&artifact, "NOPE".as_bytes()).unwrap();
+        let result = built_artifact(&dir, "nxproxy");
+        assert!(result.is_err(), ".max() fallback must not be used");
+        let _ = std::fs::remove_file(&artifact);
+        let _ = std::fs::remove_dir(&dir);
     }
 }
