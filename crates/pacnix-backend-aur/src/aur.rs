@@ -431,12 +431,7 @@ impl PackageBackend for AurBackend {
                 if deps.is_empty() {
                     return Ok(());
                 }
-                let mut command = std::process::Command::new("pacman");
-                if ctx.use_sudo {
-                    let mut sudo = std::process::Command::new("sudo");
-                    sudo.arg("pacman");
-                    command = sudo;
-                }
+                let mut command = ctx.build_command("pacman");
                 command
                     .arg("-S")
                     .arg("--needed")
@@ -472,13 +467,8 @@ impl PackageBackend for AurBackend {
                     ));
                 }
                 let artifact = built_artifact(&dir, package)?;
-                let mut command = std::process::Command::new("pacman");
-                if ctx.use_sudo {
-                    let mut sudo = std::process::Command::new("sudo");
-                    sudo.arg("pacman");
-                    command = sudo;
-                }
-                let status = command
+                let status = ctx
+                    .build_command("pacman")
                     .args(["-U", "--noconfirm"])
                     .arg(&artifact)
                     .status()

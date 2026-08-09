@@ -20,31 +20,36 @@ const VERBS: &[&str] = &[
 struct CliOptions {
     dry_run: bool,
     noconfirm: bool,
+    privilege: Option<Vec<String>>,
 }
 
 fn parse(args: &[String]) -> Result<(Command, CliOptions), String> {
     let mut dry_run = false;
     let mut noconfirm = false;
+    let mut privilege = None;
     let mut deprecated = Vec::new();
-    let filtered: Vec<String> = args
-        .iter()
-        .filter(|a| match a.as_str() {
-            "--dry-run" => {
-                dry_run = true;
-                false
+    let mut filtered: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--privilege" {
+            i += 1;
+            let value = args
+                .get(i)
+                .ok_or("--privilege requires a command (e.g. sudo, pkexec, doas)")?;
+            privilege = Some(split_words(value));
+        } else if let Some(value) = arg.strip_prefix("--privilege=") {
+            privilege = Some(split_words(value));
+        } else {
+            match arg.as_str() {
+                "--dry-run" => dry_run = true,
+                "--noconfirm" => noconfirm = true,
+                "--execute" | "-E" => deprecated.push(arg.clone()),
+                _ => filtered.push(arg.clone()),
             }
-            "--noconfirm" => {
-                noconfirm = true;
-                false
-            }
-            "--execute" | "-E" => {
-                deprecated.push((*a).clone());
-                false
-            }
-            _ => true,
-        })
-        .cloned()
-        .collect();
+        }
+        i += 1;
+    }
     if !deprecated.is_empty() {
         eprintln!(
             "pacnix: warning: {} is ignored: mutations run by default now",
@@ -84,7 +89,28 @@ fn parse(args: &[String]) -> Result<(Command, CliOptions), String> {
         }
         other => return Err(format!("unknown command: {other}")),
     };
-    Ok((command, CliOptions { dry_run, noconfirm }))
+    Ok((
+        command,
+        CliOptions {
+            dry_run,
+            noconfirm,
+            privilege,
+        },
+    ))
+}
+
+fn split_words(value: &str) -> Vec<String> {
+    value.split_whitespace().map(str::to_string).collect()
+}
+
+fn configured_privilege(opts: &CliOptions) -> Vec<String> {
+    match opts.privilege.clone() {
+        Some(argv) => argv,
+        None => match std::env::var("PACNIX_PRIVILEGE") {
+            Ok(value) => split_words(&value),
+            Err(_) => vec!["sudo".to_string()],
+        },
+    }
 }
 
 fn to_targets(args: &[String]) -> Vec<TargetSpec> {
@@ -260,7 +286,8 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
         println!(":: (dry run: nothing executed, nothing written)");
         return;
     }
-    if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege() {
+    let privilege = configured_privilege(opts);
+    if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege(&privilege) {
         return;
     }
     if !confirm(opts, ":: Proceed with installation? [Y/n]") {
@@ -276,7 +303,7 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
                     backend: p.backend,
                     plan: &p.plan,
                     ctx: ExecutionContext {
-                        use_sudo: p.plan.requires_privilege,
+                        privilege: p.plan.requires_privilege.then(|| privilege.clone()),
                     },
                 })
                 .collect(),
@@ -366,7 +393,8 @@ fn run_remove(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], op
         println!(":: (dry run: nothing executed, nothing written)");
         return;
     }
-    if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege() {
+    let privilege = configured_privilege(opts);
+    if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege(&privilege) {
         return;
     }
     if !confirm(opts, ":: Proceed with removal? [Y/n]") {
@@ -380,6 +408,7 @@ fn run_remove(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], op
             .iter()
             .map(|p| (p.backend, &p.plan))
             .collect::<Vec<_>>(),
+        &privilege,
     );
     report_outcomes(&reports);
     if reports.iter().all(|r| r.error.is_none()) {
@@ -424,7 +453,8 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
         println!(":: (dry run: nothing executed, nothing written)");
         return;
     }
-    if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege() {
+    let privilege = configured_privilege(opts);
+    if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege(&privilege) {
         return;
     }
     if !confirm(opts, ":: Proceed with upgrade? [Y/n]") {
@@ -434,7 +464,7 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
     println!(":: Upgrading...");
     let pairs: Vec<(&dyn PackageBackend, &TransactionPlan)> =
         planned.iter().map(|p| (p.backend, &p.plan)).collect();
-    let reports = execute_plans(storage, &pairs);
+    let reports = execute_plans(storage, &pairs, &privilege);
     report_outcomes(&reports);
     if reports.iter().all(|r| r.error.is_none()) {
         println!(":: Reconciling authoritative state...");
@@ -446,6 +476,7 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
 fn execute_plans(
     storage: &Storage,
     pairs: &[(&dyn PackageBackend, &TransactionPlan)],
+    privilege: &[String],
 ) -> Vec<pacnix_core::BackendReport> {
     let batch = ExecutionBatch {
         plans: pairs
@@ -454,7 +485,7 @@ fn execute_plans(
                 backend: *backend,
                 plan,
                 ctx: ExecutionContext {
-                    use_sudo: plan.requires_privilege,
+                    privilege: plan.requires_privilege.then(|| privilege.to_vec()),
                 },
             })
             .collect(),
@@ -477,19 +508,43 @@ fn report_outcomes(reports: &[pacnix_core::BackendReport]) {
     }
 }
 
-fn acquire_privilege() -> bool {
+fn acquire_privilege(privilege: &[String]) -> bool {
     println!(":: Acquiring privilege...");
-    match std::process::Command::new("sudo").arg("-v").status() {
-        Ok(s) if s.success() => true,
-        Ok(_) => {
-            eprintln!("pacnix: privilege acquisition failed");
-            false
-        }
-        Err(e) => {
-            eprintln!("pacnix: sudo unavailable: {e}");
-            false
+    let program = privilege.first().map(String::as_str).unwrap_or("sudo");
+    if program == "sudo" {
+        match std::process::Command::new("sudo").arg("-v").status() {
+            Ok(s) if s.success() => return true,
+            Ok(_) => {
+                eprintln!("pacnix: privilege acquisition failed (sudo)");
+                return false;
+            }
+            Err(e) => {
+                eprintln!("pacnix: sudo unavailable: {e}");
+                return false;
+            }
         }
     }
+    if which(program).is_none() {
+        eprintln!("pacnix: privilege command not found in PATH: {program}");
+        return false;
+    }
+    println!(":: Privilege tool: {program} (prompt on first privileged call)");
+    true
+}
+
+fn which(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file() && is_executable(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 fn confirm(opts: &CliOptions, prompt: &str) -> bool {

@@ -220,7 +220,7 @@ mod tests {
     }
 
     fn ctx() -> ExecutionContext {
-        ExecutionContext { use_sudo: false }
+        ExecutionContext { privilege: None }
     }
 
     fn tmp_storage(name: &str) -> Storage {

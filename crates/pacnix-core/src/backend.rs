@@ -4,7 +4,22 @@ use crate::model::{Candidate, InstalledPackage, Source, TransactionOperation, Tr
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionContext {
-    pub use_sudo: bool,
+    pub privilege: Option<Vec<String>>,
+}
+
+impl ExecutionContext {
+    pub fn build_command(&self, program: &str) -> std::process::Command {
+        match &self.privilege {
+            None => std::process::Command::new(program),
+            Some(argv) if argv.is_empty() => std::process::Command::new(program),
+            Some(argv) => {
+                let mut command = std::process::Command::new(&argv[0]);
+                command.args(&argv[1..]);
+                command.arg(program);
+                command
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -51,4 +66,61 @@ pub trait PackageBackend: Send + Sync {
         before: &[InstalledPackage],
         after: &[InstalledPackage],
     ) -> Result<Vec<InstalledPackage>, String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prog(cmd: &std::process::Command) -> (String, Vec<String>) {
+        (
+            cmd.get_program().to_string_lossy().into_owned(),
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn command_runs_directly_without_privilege() {
+        let (program, args) = prog(&ExecutionContext { privilege: None }.build_command("pacman"));
+        assert_eq!(program, "pacman");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn command_wraps_sudo() {
+        let (program, args) = prog(
+            &ExecutionContext {
+                privilege: Some(vec!["sudo".into()]),
+            }
+            .build_command("pacman"),
+        );
+        assert_eq!(program, "sudo");
+        assert_eq!(args, vec!["pacman"]);
+    }
+
+    #[test]
+    fn command_wraps_gui_pkexec_with_flags() {
+        let (program, args) = prog(
+            &ExecutionContext {
+                privilege: Some(vec!["pkexec".into(), "--user".into(), "root".into()]),
+            }
+            .build_command("pacman"),
+        );
+        assert_eq!(program, "pkexec");
+        assert_eq!(args, vec!["--user", "root", "pacman"]);
+    }
+
+    #[test]
+    fn empty_privilege_falls_back_to_direct() {
+        let (program, args) = prog(
+            &ExecutionContext {
+                privilege: Some(Vec::new()),
+            }
+            .build_command("pacman"),
+        );
+        assert_eq!(program, "pacman");
+        assert!(args.is_empty());
+    }
 }
