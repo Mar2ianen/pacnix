@@ -101,6 +101,16 @@ fn parse(args: &[String]) -> Result<(Command, CliOptions), String> {
     ))
 }
 
+fn desc_field<'a>(desc: &'a str, field: &str) -> Option<&'a str> {
+    let lines: Vec<&str> = desc.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if *line == field && i + 1 < lines.len() {
+            return Some(lines[i + 1].trim());
+        }
+    }
+    None
+}
+
 /// Binaries shipped by an installed pacman package, read from the local db
 /// (`usr/bin/...` entries in `/var/lib/pacman/local/<pkg>/files`).
 fn installed_binaries(package: &str) -> Vec<String> {
@@ -114,7 +124,7 @@ fn installed_binaries(package: &str) -> Vec<String> {
         let Ok(desc) = std::fs::read_to_string(dir.join("desc")) else {
             continue;
         };
-        if !desc.lines().any(|line| line.trim() == package) {
+        if desc_field(&desc, "%NAME%") != Some(package) {
             continue;
         }
         let Ok(files) = std::fs::read_to_string(dir.join("files")) else {
@@ -135,6 +145,7 @@ fn prebuilt_variant(resolver: &Resolver, exact: &str) -> Option<String> {
     let (ranked, _errors) = resolver.resolve_ranked(exact);
     ranked
         .into_iter()
+        .filter(|r| r.candidate.source == Source::Aur)
         .map(|r| r.candidate.name)
         .find(|name| match name.strip_prefix(exact) {
             Some(rest) => matches!(rest, "-bin" | "-bins" | "-static"),
@@ -319,7 +330,13 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
         println!(":: (dry run: nothing executed, nothing written)");
         return;
     }
-    let privilege = config::configured_privilege(&opts.privilege, &config::load());
+    let privilege = match config::configured_privilege(&opts.privilege, &config::load()) {
+        Ok(argv) => argv,
+        Err(e) => {
+            eprintln!("pacnix: {e}");
+            return;
+        }
+    };
     if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege(&privilege) {
         return;
     }
@@ -437,7 +454,13 @@ fn run_remove(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], op
         println!(":: (dry run: nothing executed, nothing written)");
         return;
     }
-    let privilege = config::configured_privilege(&opts.privilege, &config::load());
+    let privilege = match config::configured_privilege(&opts.privilege, &config::load()) {
+        Ok(argv) => argv,
+        Err(e) => {
+            eprintln!("pacnix: {e}");
+            return;
+        }
+    };
     if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege(&privilege) {
         return;
     }
@@ -497,7 +520,13 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
         println!(":: (dry run: nothing executed, nothing written)");
         return;
     }
-    let privilege = config::configured_privilege(&opts.privilege, &config::load());
+    let privilege = match config::configured_privilege(&opts.privilege, &config::load()) {
+        Ok(argv) => argv,
+        Err(e) => {
+            eprintln!("pacnix: {e}");
+            return;
+        }
+    };
     if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege(&privilege) {
         return;
     }
@@ -556,7 +585,10 @@ fn acquire_privilege(privilege: &[String]) -> bool {
     println!(":: Acquiring privilege...");
     let program = privilege.first().map(String::as_str).unwrap_or("sudo");
     if program == "sudo" || program == "sudo-rs" {
-        match std::process::Command::new(program).arg("-v").status() {
+        let mut command = std::process::Command::new(program);
+        command.args(&privilege[1..]);
+        command.arg("-v");
+        match command.status() {
             Ok(s) if s.success() => return true,
             Ok(_) => {
                 eprintln!("pacnix: privilege acquisition failed ({program})");

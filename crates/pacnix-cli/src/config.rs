@@ -75,34 +75,68 @@ pub fn load() -> Config {
 /// Privilege argv with fallback precedence: `--privilege` flag, then
 /// `PACNIX_PRIVILEGE` env, then `privilege.command` from the config file,
 /// then an auto-detected available tool (sudo-rs, sudo, pkexec, doas).
-pub fn configured_privilege(flag: &Option<Vec<String>>, config: &Config) -> Vec<String> {
+///
+/// Empty argv is rejected at every level: for a privileged plan it must be
+/// an actual command, otherwise execution would silently fall back to a
+/// direct root-less run while the preflight claims elevation is in place.
+pub fn configured_privilege(
+    flag: &Option<Vec<String>>,
+    config: &Config,
+) -> Result<Vec<String>, String> {
     if let Some(argv) = flag {
-        return argv.clone();
+        return reject_empty("--privilege", argv.clone());
     }
     if let Ok(value) = std::env::var("PACNIX_PRIVILEGE") {
-        return split_words(&value);
+        let argv = split_words(&value);
+        return reject_empty("PACNIX_PRIVILEGE", argv);
     }
-    if let Some(argv) = config
-        .privilege
-        .as_ref()
-        .and_then(|p| p.command.clone())
-        .map(PrivilegeCommand::argv)
-    {
-        return argv;
+    if let Some(command) = config.privilege.as_ref().and_then(|p| p.command.clone()) {
+        let argv = PrivilegeCommand::argv(command);
+        if argv.is_empty() {
+            eprintln!(
+                "pacnix: warning: empty privilege.command in config; falling back to detection"
+            );
+            return Ok(detect_privilege());
+        }
+        return Ok(argv);
     }
-    detect_privilege()
+    Ok(detect_privilege())
+}
+
+fn reject_empty(source: &str, argv: Vec<String>) -> Result<Vec<String>, String> {
+    if argv.is_empty() {
+        Err(format!(
+            "{source} must name a privilege command (e.g. sudo, pkexec, doas)"
+        ))
+    } else {
+        Ok(argv)
+    }
 }
 
 /// Picks the first privilege tool present in PATH. Preference order matters:
 /// sudo-rs, then plain sudo, then GUI pkexec, then doas.
 fn detect_privilege() -> Vec<String> {
-    const CANDIDATES: &[&str] = &["sudo-rs", "sudo", "pkexec", "doas"];
-    for candidate in CANDIDATES {
-        if find_in_path(candidate).is_some() {
-            return vec![candidate.to_string()];
-        }
+    match detect_privilege_in(std::env::var_os("PATH").as_deref()) {
+        Some(tool) => vec![tool.to_string()],
+        None => vec!["sudo".to_string()],
     }
-    vec!["sudo".to_string()]
+}
+
+fn detect_privilege_in(path: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+    const CANDIDATES: &[&str] = &["sudo-rs", "sudo", "pkexec", "doas"];
+    CANDIDATES
+        .iter()
+        .copied()
+        .find(|candidate| find_in_path_env(candidate, path))
+}
+
+fn find_in_path_env(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    std::env::split_paths(path)
+        .map(|dir| dir.join(program))
+        .any(|candidate| candidate.is_file() && is_executable(&candidate))
 }
 
 pub fn find_in_path(program: &str) -> Option<std::path::PathBuf> {
@@ -127,7 +161,7 @@ mod tests {
     #[test]
     fn parses_config_with_string_command() {
         let config: Config = toml::from_str(r#"privilege = { command = "sudo-rs" }"#).unwrap();
-        let argv = configured_privilege(&None, &config);
+        let argv = configured_privilege(&None, &config).unwrap();
         assert_eq!(argv, vec!["sudo-rs"]);
     }
 
@@ -135,21 +169,38 @@ mod tests {
     fn parses_config_with_array_command() {
         let config: Config =
             toml::from_str(r#"privilege = { command = ["sudo-rs", "-E"] }"#).unwrap();
-        let argv = configured_privilege(&None, &config);
+        let argv = configured_privilege(&None, &config).unwrap();
         assert_eq!(argv, vec!["sudo-rs", "-E"]);
     }
 
     #[test]
     fn flag_beats_config() {
         let config: Config = toml::from_str(r#"privilege = { command = "sudo-rs" }"#).unwrap();
-        let argv = configured_privilege(&Some(vec!["pkexec".to_string()]), &config);
+        let argv = configured_privilege(&Some(vec!["pkexec".to_string()]), &config).unwrap();
         assert_eq!(argv, vec!["pkexec"]);
+    }
+
+    #[test]
+    fn empty_flag_is_rejected() {
+        let config = Config::default();
+        let err = configured_privilege(&Some(Vec::new()), &config).unwrap_err();
+        assert!(err.contains("--privilege"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_env_is_rejected() {
+        let config = Config::default();
+        std::env::set_var("PACNIX_PRIVILEGE", "   ");
+        let result = configured_privilege(&None, &config);
+        std::env::remove_var("PACNIX_PRIVILEGE");
+        assert!(result.is_err(), "empty env must be rejected");
+        assert!(result.unwrap_err().contains("PACNIX_PRIVILEGE"));
     }
 
     #[test]
     fn defaults_to_detected_tool() {
         let config = Config::default();
-        let argv = configured_privilege(&None, &config);
+        let argv = configured_privilege(&None, &config).unwrap();
         assert_eq!(argv, detect_privilege(), "fallback must detect a tool");
         assert!(
             ["sudo-rs", "sudo", "pkexec", "doas"].contains(&argv[0].as_str()),
@@ -158,8 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_prefers_sudo_rs() {
-        let path = std::env::var_os("PATH").unwrap();
+    fn detect_prefers_sudo_rs_without_touching_env() {
         let dir = std::env::temp_dir().join(format!("pacnix-priv-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -171,12 +221,13 @@ mod tests {
             perms.set_mode(0o755);
             std::fs::set_permissions(&f, perms).unwrap();
         }
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", dir.display(), path.to_string_lossy()),
+        let combined = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap());
+        assert_eq!(
+            detect_privilege_in(Some(std::ffi::OsStr::new(&combined))),
+            Some("sudo-rs")
         );
-        assert_eq!(detect_privilege(), vec!["sudo-rs"]);
-        std::env::set_var("PATH", &path);
+        let empty: &std::ffi::OsStr = std::ffi::OsStr::new("");
+        assert_eq!(detect_privilege_in(Some(empty)), None, "no tool -> none");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

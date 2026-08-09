@@ -111,16 +111,4 @@ mod tests {
         assert_eq!(program, "pkexec");
         assert_eq!(args, vec!["--user", "root", "pacman"]);
     }
-
-    #[test]
-    fn empty_privilege_falls_back_to_direct() {
-        let (program, args) = prog(
-            &ExecutionContext {
-                privilege: Some(Vec::new()),
-            }
-            .build_command("pacman"),
-        );
-        assert_eq!(program, "pacman");
-        assert!(args.is_empty());
-    }
 }

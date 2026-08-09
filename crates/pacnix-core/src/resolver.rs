@@ -127,8 +127,14 @@ impl Resolver {
         let top = &ranked[0];
         let second = &ranked[1];
         if top.score > second.score {
-            if top.candidate.name == query
-                && Self::has_prebuilt_variant(&top.candidate.name, &ranked)
+            let previously_preferred = top
+                .reasons
+                .iter()
+                .any(|r| matches!(r, Reason::PreviousPreference));
+            if !previously_preferred
+                && top.candidate.source == Source::Aur
+                && top.candidate.name == query
+                && Self::has_aur_prebuilt_variant(&top.candidate.name, &ranked)
             {
                 return ResolutionDecision::Ambiguous(ranked);
             }
@@ -139,15 +145,19 @@ impl Resolver {
         }
     }
 
-    /// True if we also found a ready-made binary variant of `query`
-    /// (e.g. `servo-bin` next to `servo`); the user should pick.
-    fn has_prebuilt_variant(query: &str, ranked: &[RankedCandidate]) -> bool {
+    /// True if we also found an AUR prebuilt variant of an AUR `query`
+    /// (e.g. `servo-bin` next to `servo`); the user should pick between the
+    /// source build and the ready-made binary. Only AUR candidates count:
+    /// an exact repo package must not become ambiguous just because some
+    /// unrelated `-bin` AUR package exists, and a remembered preference
+    /// already carries +1000 via `PreviousPreference`.
+    fn has_aur_prebuilt_variant(query: &str, ranked: &[RankedCandidate]) -> bool {
         ranked.iter().any(|entry| {
-            let name = entry.candidate.name.as_str();
-            match name.strip_prefix(query) {
-                Some(rest) => matches!(rest, "-bin" | "-bins" | "-static"),
-                None => false,
-            }
+            entry.candidate.source == Source::Aur
+                && match entry.candidate.name.as_str().strip_prefix(query) {
+                    Some(rest) => matches!(rest, "-bin" | "-bins" | "-static"),
+                    None => false,
+                }
         })
     }
 
@@ -328,6 +338,50 @@ mod tests {
                 assert_eq!(ranked[1].candidate.name, "servo-bin");
             }
             other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_alpm_package_not_ambiguous_by_aur_bin() {
+        let resolver = Resolver::new(vec![
+            Box::new(MockBackend {
+                source: Source::Alpm,
+                name: "alpm",
+                results: Ok(vec![candidate(Source::Alpm, "extra", "firefox")]),
+            }),
+            Box::new(MockBackend {
+                source: Source::Aur,
+                name: "aur",
+                results: Ok(vec![
+                    candidate(Source::Aur, "aur", "firefox"),
+                    candidate(Source::Aur, "aur", "firefox-bin"),
+                ]),
+            }),
+        ]);
+        match resolver.resolve("firefox") {
+            ResolutionDecision::Selected(winner) => {
+                assert_eq!(winner.candidate.source, Source::Alpm);
+            }
+            other => panic!("expected Selected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remembered_preference_skips_prebuilt_picker() {
+        let resolver = Resolver::new(vec![Box::new(MockBackend {
+            source: Source::Aur,
+            name: "aur",
+            results: Ok(vec![
+                candidate(Source::Aur, "aur", "servo"),
+                candidate(Source::Aur, "aur", "servo-bin"),
+            ]),
+        })]);
+        match resolver.resolve_with_preference("servo", Some(("aur", "aur/servo"))) {
+            ResolutionDecision::Selected(winner) => {
+                assert_eq!(winner.candidate.name, "servo");
+                assert!(winner.reasons.contains(&Reason::PreviousPreference));
+            }
+            other => panic!("expected Selected, got {other:?}"),
         }
     }
 
