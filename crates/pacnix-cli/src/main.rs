@@ -13,6 +13,8 @@ use pacnix_core::{
     TransactionPlan,
 };
 
+mod config;
+
 const VERBS: &[&str] = &[
     "install", "remove", "search", "info", "list", "upgrade", "sync",
 ];
@@ -101,16 +103,6 @@ fn parse(args: &[String]) -> Result<(Command, CliOptions), String> {
 
 fn split_words(value: &str) -> Vec<String> {
     value.split_whitespace().map(str::to_string).collect()
-}
-
-fn configured_privilege(opts: &CliOptions) -> Vec<String> {
-    match opts.privilege.clone() {
-        Some(argv) => argv,
-        None => match std::env::var("PACNIX_PRIVILEGE") {
-            Ok(value) => split_words(&value),
-            Err(_) => vec!["sudo".to_string()],
-        },
-    }
 }
 
 fn to_targets(args: &[String]) -> Vec<TargetSpec> {
@@ -286,7 +278,7 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
         println!(":: (dry run: nothing executed, nothing written)");
         return;
     }
-    let privilege = configured_privilege(opts);
+    let privilege = config::configured_privilege(&opts.privilege, &config::load());
     if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege(&privilege) {
         return;
     }
@@ -393,7 +385,7 @@ fn run_remove(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], op
         println!(":: (dry run: nothing executed, nothing written)");
         return;
     }
-    let privilege = configured_privilege(opts);
+    let privilege = config::configured_privilege(&opts.privilege, &config::load());
     if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege(&privilege) {
         return;
     }
@@ -453,7 +445,7 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
         println!(":: (dry run: nothing executed, nothing written)");
         return;
     }
-    let privilege = configured_privilege(opts);
+    let privilege = config::configured_privilege(&opts.privilege, &config::load());
     if planned.iter().any(|p| p.plan.requires_privilege) && !acquire_privilege(&privilege) {
         return;
     }
