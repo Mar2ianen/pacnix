@@ -74,7 +74,7 @@ pub fn load() -> Config {
 
 /// Privilege argv with fallback precedence: `--privilege` flag, then
 /// `PACNIX_PRIVILEGE` env, then `privilege.command` from the config file,
-/// then plain `sudo`.
+/// then an auto-detected available tool (sudo-rs, sudo, pkexec, doas).
 pub fn configured_privilege(flag: &Option<Vec<String>>, config: &Config) -> Vec<String> {
     if let Some(argv) = flag {
         return argv.clone();
@@ -90,7 +90,34 @@ pub fn configured_privilege(flag: &Option<Vec<String>>, config: &Config) -> Vec<
     {
         return argv;
     }
+    detect_privilege()
+}
+
+/// Picks the first privilege tool present in PATH. Preference order matters:
+/// sudo-rs, then plain sudo, then GUI pkexec, then doas.
+fn detect_privilege() -> Vec<String> {
+    const CANDIDATES: &[&str] = &["sudo-rs", "sudo", "pkexec", "doas"];
+    for candidate in CANDIDATES {
+        if find_in_path(candidate).is_some() {
+            return vec![candidate.to_string()];
+        }
+    }
     vec!["sudo".to_string()]
+}
+
+pub fn find_in_path(program: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file() && is_executable(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -120,10 +147,37 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_sudo() {
+    fn defaults_to_detected_tool() {
         let config = Config::default();
         let argv = configured_privilege(&None, &config);
-        assert_eq!(argv, vec!["sudo"]);
+        assert_eq!(argv, detect_privilege(), "fallback must detect a tool");
+        assert!(
+            ["sudo-rs", "sudo", "pkexec", "doas"].contains(&argv[0].as_str()),
+            "detected tool must be a known privilege tool"
+        );
+    }
+
+    #[test]
+    fn detect_prefers_sudo_rs() {
+        let path = std::env::var_os("PATH").unwrap();
+        let dir = std::env::temp_dir().join(format!("pacnix-priv-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for tool in ["sudo-rs", "sudo", "pkexec"] {
+            let f = dir.join(tool);
+            std::fs::write(&f, "").unwrap();
+            let mut perms = std::fs::metadata(&f).unwrap().permissions();
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&f, perms).unwrap();
+        }
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", dir.display(), path.to_string_lossy()),
+        );
+        assert_eq!(detect_privilege(), vec!["sudo-rs"]);
+        std::env::set_var("PATH", &path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

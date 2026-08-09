@@ -101,6 +101,36 @@ fn parse(args: &[String]) -> Result<(Command, CliOptions), String> {
     ))
 }
 
+/// Binaries shipped by an installed pacman package, read from the local db
+/// (`usr/bin/...` entries in `/var/lib/pacman/local/<pkg>/files`).
+fn installed_binaries(package: &str) -> Vec<String> {
+    let local = std::path::Path::new("/var/lib/pacman/local");
+    let Ok(entries) = std::fs::read_dir(local) else {
+        return Vec::new();
+    };
+    let mut binaries = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let Ok(desc) = std::fs::read_to_string(dir.join("desc")) else {
+            continue;
+        };
+        if !desc.lines().any(|line| line.trim() == package) {
+            continue;
+        }
+        let Ok(files) = std::fs::read_to_string(dir.join("files")) else {
+            return binaries;
+        };
+        binaries = files
+            .lines()
+            .map(|line| line.trim_start_matches('/'))
+            .filter(|line| line.starts_with("usr/bin/") && !line.ends_with('/'))
+            .map(|line| line.trim_start_matches("usr/bin/").to_string())
+            .collect();
+        break;
+    }
+    binaries
+}
+
 fn prebuilt_variant(resolver: &Resolver, exact: &str) -> Option<String> {
     let (ranked, _errors) = resolver.resolve_ranked(exact);
     ranked
@@ -319,6 +349,10 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
         if report.error.is_none() {
             if !report.receipts.is_empty() {
                 println!(":: Installed {}", item.candidate.name);
+                let bins = installed_binaries(&item.candidate.name);
+                if !bins.is_empty() {
+                    println!("   bin: {}", bins.join(", "));
+                }
             }
             if let Err(e) = storage.remember_alias(
                 &item.query,
@@ -521,40 +555,25 @@ fn report_outcomes(reports: &[pacnix_core::BackendReport]) {
 fn acquire_privilege(privilege: &[String]) -> bool {
     println!(":: Acquiring privilege...");
     let program = privilege.first().map(String::as_str).unwrap_or("sudo");
-    if program == "sudo" {
-        match std::process::Command::new("sudo").arg("-v").status() {
+    if program == "sudo" || program == "sudo-rs" {
+        match std::process::Command::new(program).arg("-v").status() {
             Ok(s) if s.success() => return true,
             Ok(_) => {
-                eprintln!("pacnix: privilege acquisition failed (sudo)");
+                eprintln!("pacnix: privilege acquisition failed ({program})");
                 return false;
             }
             Err(e) => {
-                eprintln!("pacnix: sudo unavailable: {e}");
+                eprintln!("pacnix: {program} unavailable: {e}");
                 return false;
             }
         }
     }
-    if which(program).is_none() {
+    if config::find_in_path(program).is_none() {
         eprintln!("pacnix: privilege command not found in PATH: {program}");
         return false;
     }
     println!(":: Privilege tool: {program} (prompt on first privileged call)");
     true
-}
-
-fn which(program: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(program))
-        .find(|candidate| candidate.is_file() && is_executable(candidate))
-}
-
-#[cfg(unix)]
-fn is_executable(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|meta| meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
 }
 
 fn confirm(opts: &CliOptions, prompt: &str) -> bool {
