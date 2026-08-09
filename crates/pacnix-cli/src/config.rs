@@ -212,13 +212,26 @@ mod tests {
     #[test]
     fn defaults_to_detected_tool() {
         let config = Config::default();
-        let path = std::env::var_os("PATH").unwrap();
-        let argv = configured_privilege_from(&None, None, &config, Some(&path)).unwrap();
+        let dir = std::env::temp_dir().join(format!("pacnix-priv-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for tool in ["sudo-rs", "sudo", "pkexec"] {
+            let f = dir.join(tool);
+            std::fs::write(&f, "").unwrap();
+            let mut perms = std::fs::metadata(&f).unwrap().permissions();
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&f, perms).unwrap();
+        }
+        let argv = configured_privilege_from(
+            &None,
+            None,
+            &config,
+            Some(std::ffi::OsStr::new(dir.to_string_lossy().as_ref())),
+        )
+        .unwrap();
         assert_eq!(argv[0], "sudo-rs", "detection must find sudo-rs in PATH");
-        assert!(
-            ["sudo-rs", "sudo", "pkexec", "doas"].contains(&argv[0].as_str()),
-            "detected tool must be a known privilege tool"
-        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
