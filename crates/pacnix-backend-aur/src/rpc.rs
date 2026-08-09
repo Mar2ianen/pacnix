@@ -12,7 +12,7 @@ pub struct RpcResponse {
     pub results: Vec<AurPackage>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AurPackage {
     #[serde(rename = "Name")]
     pub name: String,
@@ -24,29 +24,44 @@ pub struct AurPackage {
     pub url_path: Option<String>,
     #[serde(rename = "PackageBase")]
     pub package_base: Option<String>,
+    #[serde(rename = "Depends", default)]
+    pub depends: Vec<String>,
+    #[serde(rename = "MakeDepends", default)]
+    pub make_depends: Vec<String>,
+    #[serde(rename = "CheckDepends", default)]
+    pub check_depends: Vec<String>,
+}
+
+pub fn info_by_name(names: &[String]) -> Result<Vec<AurPackage>, String> {
+    let mut url = String::from("https://aur.archlinux.org/rpc/v5/info?");
+    for name in names {
+        url.push_str("arg[]=");
+        url.push_str(name);
+        url.push('&');
+    }
+    let agent = ureq::Agent::new_with_defaults();
+    let body = agent
+        .get(&url)
+        .call()
+        .map_err(|e| format!("AUR RPC failed: {e}"))?
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
+    info_from_json(&body)
+}
+
+pub fn info_from_json(json: &str) -> Result<Vec<AurPackage>, String> {
+    let response: RpcResponse = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    if response.kind == "error" {
+        return Err("AUR RPC error response".into());
+    }
+    Ok(response.results)
 }
 
 pub fn existing_names(names: &[String]) -> Result<Vec<String>, String> {
     let mut existing = Vec::new();
     for chunk in names.chunks(50) {
-        let mut url = String::from("https://aur.archlinux.org/rpc/v5/info?");
-        for name in chunk {
-            url.push_str("arg[]=");
-            url.push_str(name);
-            url.push('&');
-        }
-        let agent = ureq::Agent::new_with_defaults();
-        let body = agent
-            .get(&url)
-            .call()
-            .map_err(|e| format!("AUR RPC failed: {e}"))?
-            .into_body()
-            .read_to_string()
-            .map_err(|e| e.to_string())?;
-        let response: RpcResponse = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-        for result in response.results {
-            existing.push(result.name);
-        }
+        existing.extend(info_by_name(chunk)?.into_iter().map(|p| p.name));
     }
     existing.sort();
     existing.dedup();
@@ -103,5 +118,43 @@ mod tests {
     fn rejects_error_response() {
         let json = r#"{"version": 5, "type": "error", "resultcount": 0, "results": []}"#;
         assert!(search_from_json(json).is_err());
+    }
+
+    #[test]
+    fn parses_info_dependencies() {
+        let json = r#"{
+            "version": 5,
+            "type": "info",
+            "resultcount": 1,
+            "results": [{
+                "Name": "foo",
+                "Version": "1.0-1",
+                "Description": null,
+                "URLPath": "/cgit/aur.git/snapshot/foo.tar.gz",
+                "PackageBase": "foo",
+                "Depends": ["libx11", "gcc>=13"],
+                "MakeDepends": ["cmake"],
+                "CheckDepends": ["python"]
+            }]
+        }"#;
+        let packages = info_from_json(json).unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].depends, vec!["libx11", "gcc>=13"]);
+        assert_eq!(packages[0].make_depends, vec!["cmake"]);
+        assert_eq!(packages[0].check_depends, vec!["python"]);
+    }
+
+    #[test]
+    fn missing_dep_fields_default_to_empty() {
+        let json = r#"{
+            "version": 5,
+            "type": "search",
+            "resultcount": 1,
+            "results": [{"Name": "bar", "Version": "1.0-1", "Description": null, "URLPath": null, "PackageBase": "bar"}]
+        }"#;
+        let packages = search_from_json(json).unwrap();
+        assert!(packages[0].depends.is_empty());
+        assert!(packages[0].make_depends.is_empty());
+        assert!(packages[0].check_depends.is_empty());
     }
 }

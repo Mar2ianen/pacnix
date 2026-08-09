@@ -268,6 +268,9 @@ struct PlannedInstall<'a> {
     candidate: Candidate,
     backend: &'a dyn PackageBackend,
     plan: TransactionPlan,
+    /// True only for the user-requested target; dependency plans in an AUR
+    /// chain are auxiliary and never alias-remembered.
+    is_target: bool,
 }
 
 fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], opts: &CliOptions) {
@@ -308,13 +311,19 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
             ranked.candidate.provider, ranked.candidate.name
         );
         let backend = select_backend(resolver, &ranked.candidate);
-        match backend.plan_install(&ranked.candidate) {
-            Ok(plan) => planned.push(PlannedInstall {
-                query: target.query.clone(),
-                candidate: ranked.candidate.clone(),
-                backend,
-                plan,
-            }),
+        match backend.plan_install_chain(&ranked.candidate) {
+            Ok(plans) => {
+                let last = plans.len().saturating_sub(1);
+                for (idx, plan) in plans.into_iter().enumerate() {
+                    planned.push(PlannedInstall {
+                        query: target.query.clone(),
+                        candidate: ranked.candidate.clone(),
+                        backend,
+                        plan,
+                        is_target: idx == last,
+                    });
+                }
+            }
             Err(e) => failed.push(format!("{}: {e}", backend.name())),
         }
     }
@@ -369,7 +378,7 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
     for (report, item) in reports.iter().zip(planned.iter()) {
         if report.error.is_none() {
             if !report.receipts.is_empty() {
-                println!(":: Installed {}", item.candidate.name);
+                println!(":: Installed {}", item.plan.name);
                 let mut bins: Vec<String> = Vec::new();
                 for receipt in &report.receipts {
                     if receipt.installed_backend == "alpm" {
@@ -381,16 +390,18 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
                     println!("   bin: {}", bins.join(", "));
                 }
             }
-            if let Err(e) = storage.remember_alias(
-                &item.query,
-                item.candidate.source.as_str(),
-                &item.candidate.backend_ref,
-            ) {
-                eprintln!("pacnix: storage: {e}");
+            if item.is_target {
+                if let Err(e) = storage.remember_alias(
+                    &item.query,
+                    item.candidate.source.as_str(),
+                    &item.candidate.backend_ref,
+                ) {
+                    eprintln!("pacnix: storage: {e}");
+                }
             }
         } else {
             ok = false;
-            if item.candidate.source == Source::Aur {
+            if item.is_target && item.candidate.source == Source::Aur {
                 if let Some(bin) = prebuilt_variant(resolver, &item.candidate.name) {
                     eprintln!(
                         "pacnix: hint: a prebuilt variant is available: try `pacnix -S {bin}`"
@@ -718,10 +729,10 @@ fn print_install_summary(planned: &[PlannedInstall]) {
                 Some(b) => println!(
                     "  {}/{} ({} disk)",
                     item.candidate.provider,
-                    item.candidate.name,
+                    item.plan.name,
                     human_size(*b)
                 ),
-                None => println!("  {}/{}", item.candidate.provider, item.candidate.name),
+                None => println!("  {}/{}", item.candidate.provider, item.plan.name),
             }
         }
         if sizes.iter().all(Option::is_some) && !sizes.is_empty() {

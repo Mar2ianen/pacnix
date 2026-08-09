@@ -54,6 +54,12 @@ pub trait PackageBackend: Send + Sync {
     fn search(&self, query: &str) -> Result<Vec<Candidate>, String>;
     fn installed(&self) -> Result<Vec<InstalledPackage>, String>;
     fn plan_install(&self, target: &Candidate) -> Result<TransactionPlan, String>;
+    /// Plans the target together with its non-repository dependencies,
+    /// deps-first. Backends without dependency graphs (e.g. alpm) install the
+    /// target alone; backends like aur override this with recursive expansion.
+    fn plan_install_chain(&self, target: &Candidate) -> Result<Vec<TransactionPlan>, String> {
+        Ok(vec![self.plan_install(target)?])
+    }
     fn plan_remove(&self, target: &InstalledPackage) -> Result<TransactionPlan, String>;
     fn plan_upgrade(&self, target: &InstalledPackage) -> Result<TransactionPlan, String>;
     fn plan_upgrade_all(&self) -> Result<TransactionPlan, String>;

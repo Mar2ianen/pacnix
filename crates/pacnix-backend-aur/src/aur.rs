@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
+use std::collections::HashSet;
+
 use pacnix_core::model::{
     Candidate, InstalledPackage, Source, TransactionOperation, TransactionPlan,
 };
@@ -198,6 +200,88 @@ fn build_dependencies(dir: &std::path::Path, package: &str) -> Result<Vec<String
     Ok(parse_srcinfo_deps(&text, &current_arch(), package))
 }
 
+/// Strips a version constraint from a dependency string, e.g.
+/// `gcc>=13` -> `gcc`, `libx11` -> `libx11`.
+fn dep_name(dep: &str) -> String {
+    dep.split(['>', '<', '=', '!'])
+        .next()
+        .unwrap_or(dep)
+        .trim()
+        .to_string()
+}
+
+/// All build-relevant dependency names of a package: runtime `depends`,
+/// `makedepends` and `checkdepends`, deduplicated and constraint-stripped.
+fn dep_names_of(pkg: &AurPackage) -> Vec<String> {
+    let mut deps: Vec<String> = Vec::new();
+    for raw in pkg
+        .depends
+        .iter()
+        .chain(pkg.make_depends.iter())
+        .chain(pkg.check_depends.iter())
+    {
+        let name = dep_name(raw);
+        if !name.is_empty() && !deps.iter().any(|d| d == &name) {
+            deps.push(name);
+        }
+    }
+    deps
+}
+
+/// Expands the AUR-only dependency graph of `top`, deps-first (the target
+/// itself is last). `info(name)` returns the AUR package or `Ok(None)` when
+/// the name is a repository package (or absent); `installed(name)` reports
+/// whether pacman already satisfies it. A dependency cycle fails the
+/// expansion instead of looping.
+fn expand_chain(
+    top: &str,
+    info: &dyn Fn(&str) -> Result<Option<AurPackage>, String>,
+    installed: &dyn Fn(&str) -> bool,
+) -> Result<Vec<AurPackage>, String> {
+    #[derive(Clone)]
+    enum Frame {
+        Expand(String, Vec<String>),
+        Emit(AurPackage),
+    }
+    let mut order: Vec<AurPackage> = Vec::new();
+    let mut done: HashSet<String> = HashSet::new();
+    let mut stack: Vec<Frame> = vec![Frame::Expand(top.to_string(), Vec::new())];
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Emit(pkg) => order.push(pkg),
+            Frame::Expand(name, path) => {
+                if done.contains(&name) {
+                    continue;
+                }
+                let Some(pkg) = info(&name)? else {
+                    continue;
+                };
+                done.insert(name.clone());
+                let deps = dep_names_of(&pkg);
+                stack.push(Frame::Emit(pkg));
+                for dep in deps {
+                    if installed(&dep) {
+                        continue;
+                    }
+                    let mut child_path = path.clone();
+                    child_path.push(name.clone());
+                    if let Some(pos) = child_path.iter().position(|p| p == &dep) {
+                        let mut cycle: Vec<&str> =
+                            child_path[pos..].iter().map(String::as_str).collect();
+                        cycle.push(dep.as_str());
+                        return Err(format!("dependency cycle: {}", cycle.join(" -> ")));
+                    }
+                    if done.contains(&dep) {
+                        continue;
+                    }
+                    stack.push(Frame::Expand(dep, child_path));
+                }
+            }
+        }
+    }
+    Ok(order)
+}
+
 fn build_package(package: &str, dir: &std::path::Path) -> Result<(), String> {
     let status = std::process::Command::new("makepkg")
         .args(["--noconfirm", "--needed"])
@@ -371,6 +455,26 @@ impl PackageBackend for AurBackend {
             ],
             requires_privilege: true,
         })
+    }
+
+    fn plan_install_chain(&self, target: &Candidate) -> Result<Vec<TransactionPlan>, String> {
+        let chain = expand_chain(
+            &target.name,
+            &|name| {
+                rpc::info_by_name(&[name.to_string()])
+                    .map(|pkgs| pkgs.into_iter().find(|p| p.name == name))
+            },
+            &|name| installed_desc(name).ok().flatten().is_some(),
+        )?;
+        if chain.is_empty() {
+            return Err(format!("{}: not found in AUR", target.name));
+        }
+        let mut plans = Vec::new();
+        for pkg in chain {
+            let candidate = rpc::to_candidates(vec![pkg]).remove(0);
+            plans.push(self.plan_install(&candidate)?);
+        }
+        Ok(plans)
     }
 
     fn plan_remove(&self, target: &InstalledPackage) -> Result<TransactionPlan, String> {
@@ -633,5 +737,125 @@ makedepends_x86_64 = cmake
         assert!(result.is_err(), ".max() fallback must not be used");
         let _ = std::fs::remove_file(&artifact);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    fn pkg(name: &str, deps: &[&str]) -> AurPackage {
+        AurPackage {
+            name: name.to_string(),
+            version: Some("1.0-1".to_string()),
+            description: None,
+            url_path: None,
+            package_base: Some(name.to_string()),
+            depends: deps.iter().map(|d| d.to_string()).collect(),
+            make_depends: Vec::new(),
+            check_depends: Vec::new(),
+        }
+    }
+
+    fn names(packages: &[AurPackage]) -> Vec<String> {
+        packages.iter().map(|p| p.name.clone()).collect()
+    }
+
+    #[test]
+    fn dep_name_strips_version_constraints() {
+        assert_eq!(dep_name("gcc>=13"), "gcc");
+        assert_eq!(dep_name("libx11"), "libx11");
+        assert_eq!(dep_name("libpng!=1.2"), "libpng");
+        assert_eq!(dep_name("  curl<2 "), "curl");
+    }
+
+    #[test]
+    fn expand_chain_orders_deps_first() {
+        let table = [
+            pkg("a", &["b"]),
+            pkg("b", &["c"]),
+            pkg("c", &[]),
+            pkg("d", &[]),
+        ];
+        let find = |name: &str| {
+            table
+                .iter()
+                .find(|p| p.name == name)
+                .cloned()
+                .ok_or_else(|| format!("no info for {name}"))
+                .map(Some)
+        };
+        let chain = expand_chain("a", &find, &|_| false).unwrap();
+        assert_eq!(names(&chain), vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn expand_chain_dedupes_diamond() {
+        let table = [
+            pkg("a", &["b", "c"]),
+            pkg("b", &["d"]),
+            pkg("c", &["d"]),
+            pkg("d", &[]),
+        ];
+        let find = |name: &str| {
+            table
+                .iter()
+                .find(|p| p.name == name)
+                .cloned()
+                .ok_or_else(|| format!("no info for {name}"))
+                .map(Some)
+        };
+        let chain = expand_chain("a", &find, &|_| false).unwrap();
+        let order = names(&chain);
+        assert_eq!(order.last().unwrap(), "a", "target must be installed last");
+        assert_eq!(order.iter().filter(|n| n.as_str() == "d").count(), 1);
+        assert_eq!(order.len(), 4);
+    }
+
+    #[test]
+    fn expand_chain_reports_cycles() {
+        let table = [pkg("a", &["b"]), pkg("b", &["a"])];
+        let find = |name: &str| {
+            table
+                .iter()
+                .find(|p| p.name == name)
+                .cloned()
+                .ok_or_else(|| format!("no info for {name}"))
+                .map(Some)
+        };
+        let err = expand_chain("a", &find, &|_| false).unwrap_err();
+        assert!(err.contains("a -> b -> a"), "got: {err}");
+    }
+
+    #[test]
+    fn expand_chain_skips_installed_and_repo_deps() {
+        let table = [pkg("a", &["b", "c"]), pkg("c", &[])];
+        let find = |name: &str| {
+            table
+                .iter()
+                .find(|p| p.name == name)
+                .cloned()
+                .ok_or_else(|| format!("no info for {name}"))
+                .map(Some)
+        };
+        let chain = expand_chain("a", &find, &|name| name == "b").unwrap();
+        assert_eq!(names(&chain), vec!["c", "a"]);
+    }
+
+    #[test]
+    fn expand_chain_propagates_network_errors() {
+        let err = expand_chain("a", &|_| Err("network down".to_string()), &|_| false).unwrap_err();
+        assert!(err.contains("network down"), "got: {err}");
+    }
+
+    #[test]
+    fn aur_plan_chain_puts_target_last() {
+        let table = [pkg("a", &["b"]), pkg("b", &[])];
+        let find = |name: &str| {
+            table
+                .iter()
+                .find(|p| p.name == name)
+                .cloned()
+                .ok_or_else(|| format!("no info for {name}"))
+                .map(Some)
+        };
+        let chain = expand_chain("a", &find, &|_| false).unwrap();
+        assert_eq!(chain.last().unwrap().name, "a");
+        assert_eq!(chain[0].name, "b");
     }
 }
