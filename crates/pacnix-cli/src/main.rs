@@ -101,6 +101,17 @@ fn parse(args: &[String]) -> Result<(Command, CliOptions), String> {
     ))
 }
 
+fn prebuilt_variant(resolver: &Resolver, exact: &str) -> Option<String> {
+    let (ranked, _errors) = resolver.resolve_ranked(exact);
+    ranked
+        .into_iter()
+        .map(|r| r.candidate.name)
+        .find(|name| match name.strip_prefix(exact) {
+            Some(rest) => matches!(rest, "-bin" | "-bins" | "-static"),
+            None => false,
+        })
+}
+
 fn split_words(value: &str) -> Vec<String> {
     value.split_whitespace().map(str::to_string).collect()
 }
@@ -318,6 +329,13 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
             }
         } else {
             ok = false;
+            if item.candidate.source == Source::Aur {
+                if let Some(bin) = prebuilt_variant(resolver, &item.candidate.name) {
+                    eprintln!(
+                        "pacnix: hint: a prebuilt variant is available: try `pacnix -S {bin}`"
+                    );
+                }
+            }
         }
     }
     if ok {

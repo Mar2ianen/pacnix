@@ -17,7 +17,18 @@ fn snapshot_url(package_base: &str, url_path: Option<&str>) -> String {
 }
 
 fn build_dir(package: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("pacnix-aur-{package}"))
+    if let Some(dir) = std::env::var_os("PACNIX_AUR_BUILD_DIR") {
+        let base = std::path::PathBuf::from(dir);
+        return base.join(format!("pacnix-aur-{package}"));
+    }
+    let cache = match std::env::var_os("XDG_CACHE_HOME") {
+        Some(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+        _ => {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            std::path::PathBuf::from(home).join(".cache")
+        }
+    };
+    cache.join("pacnix").join("aur").join(package)
 }
 
 fn try_download_snapshot(
@@ -512,8 +523,10 @@ mod tests {
         );
         assert_eq!(
             build_dir("hiddify").file_name().unwrap(),
-            "pacnix-aur-hiddify"
+            "hiddify",
+            "build dir must live under a persistent cache, not tmpfs"
         );
+        assert!(build_dir("hiddify").starts_with(std::env::var("HOME").unwrap()));
     }
 
     #[test]

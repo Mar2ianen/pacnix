@@ -127,11 +127,28 @@ impl Resolver {
         let top = &ranked[0];
         let second = &ranked[1];
         if top.score > second.score {
+            if top.candidate.name == query
+                && Self::has_prebuilt_variant(&top.candidate.name, &ranked)
+            {
+                return ResolutionDecision::Ambiguous(ranked);
+            }
             let winner = ranked.remove(0);
             ResolutionDecision::Selected(winner)
         } else {
             ResolutionDecision::Ambiguous(ranked)
         }
+    }
+
+    /// True if we also found a ready-made binary variant of `query`
+    /// (e.g. `servo-bin` next to `servo`); the user should pick.
+    fn has_prebuilt_variant(query: &str, ranked: &[RankedCandidate]) -> bool {
+        ranked.iter().any(|entry| {
+            let name = entry.candidate.name.as_str();
+            match name.strip_prefix(query) {
+                Some(rest) => matches!(rest, "-bin" | "-bins" | "-static"),
+                None => false,
+            }
+        })
     }
 
     fn collect(&self, query: &str) -> (Vec<Candidate>, Vec<BackendError>) {
@@ -291,6 +308,44 @@ mod tests {
                 assert!(winner.reasons.contains(&Reason::ExactName));
             }
             other => panic!("expected Best, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prebuilt_variant_makes_exact_ambiguous() {
+        let resolver = Resolver::new(vec![Box::new(MockBackend {
+            source: Source::Aur,
+            name: "aur",
+            results: Ok(vec![
+                candidate(Source::Aur, "aur", "servo"),
+                candidate(Source::Aur, "aur", "servo-bin"),
+            ]),
+        })]);
+        match resolver.resolve("servo") {
+            ResolutionDecision::Ambiguous(ranked) => {
+                assert_eq!(ranked.len(), 2);
+                assert_eq!(ranked[0].candidate.name, "servo");
+                assert_eq!(ranked[1].candidate.name, "servo-bin");
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_beats_substring_without_prebuilt_variant() {
+        let resolver = Resolver::new(vec![Box::new(MockBackend {
+            source: Source::Aur,
+            name: "aur",
+            results: Ok(vec![
+                candidate(Source::Aur, "aur", "servo"),
+                candidate(Source::Aur, "aur", "servo-spp-git"),
+            ]),
+        })]);
+        match resolver.resolve("servo") {
+            ResolutionDecision::Selected(winner) => {
+                assert_eq!(winner.candidate.name, "servo");
+            }
+            other => panic!("expected Selected, got {other:?}"),
         }
     }
 

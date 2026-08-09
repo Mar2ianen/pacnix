@@ -63,7 +63,10 @@ pub fn load() -> Config {
     match toml::from_str(&text) {
         Ok(config) => config,
         Err(err) => {
-            eprintln!("pacnix: warning: ignoring broken config {}: {err}", path.display());
+            eprintln!(
+                "pacnix: warning: ignoring broken config {}: {err}",
+                path.display()
+            );
             Config::default()
         }
     }
@@ -72,10 +75,7 @@ pub fn load() -> Config {
 /// Privilege argv with fallback precedence: `--privilege` flag, then
 /// `PACNIX_PRIVILEGE` env, then `privilege.command` from the config file,
 /// then plain `sudo`.
-pub fn configured_privilege(
-    flag: &Option<Vec<String>>,
-    config: &Config,
-) -> Vec<String> {
+pub fn configured_privilege(flag: &Option<Vec<String>>, config: &Config) -> Vec<String> {
     if let Some(argv) = flag {
         return argv.clone();
     }
@@ -115,10 +115,7 @@ mod tests {
     #[test]
     fn flag_beats_config() {
         let config: Config = toml::from_str(r#"privilege = { command = "sudo-rs" }"#).unwrap();
-        let argv = configured_privilege(
-            &Some(vec!["pkexec".to_string()]),
-            &config,
-        );
+        let argv = configured_privilege(&Some(vec!["pkexec".to_string()]), &config);
         assert_eq!(argv, vec!["pkexec"]);
     }
 
