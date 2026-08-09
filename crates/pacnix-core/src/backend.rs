@@ -3,20 +3,34 @@
 use crate::model::{Candidate, InstalledPackage, Source, TransactionOperation, TransactionPlan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Privilege {
+    /// Run commands directly as the current user.
+    Direct,
+    /// Elevate via the given argv prefix, e.g. `["sudo-rs"]` or
+    /// `["pkexec", "--user", "root"]`.
+    Elevate(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionContext {
-    pub privilege: Option<Vec<String>>,
+    pub privilege: Privilege,
 }
 
 impl ExecutionContext {
-    pub fn build_command(&self, program: &str) -> std::process::Command {
+    /// Builds a command that executes `program`, optionally wrapped in the
+    /// privilege argv. `Elevate` with an empty argv is rejected so a
+    /// privileged plan can never silently run unprivileged.
+    pub fn build_command(&self, program: &str) -> Result<std::process::Command, String> {
         match &self.privilege {
-            None => std::process::Command::new(program),
-            Some(argv) if argv.is_empty() => std::process::Command::new(program),
-            Some(argv) => {
+            Privilege::Direct => Ok(std::process::Command::new(program)),
+            Privilege::Elevate(argv) if argv.is_empty() => Err(format!(
+                "privilege argv must name a command, got empty for {program}"
+            )),
+            Privilege::Elevate(argv) => {
                 let mut command = std::process::Command::new(&argv[0]);
                 command.args(&argv[1..]);
                 command.arg(program);
-                command
+                Ok(command)
             }
         }
     }
@@ -83,7 +97,13 @@ mod tests {
 
     #[test]
     fn command_runs_directly_without_privilege() {
-        let (program, args) = prog(&ExecutionContext { privilege: None }.build_command("pacman"));
+        let (program, args) = prog(
+            &ExecutionContext {
+                privilege: Privilege::Direct,
+            }
+            .build_command("pacman")
+            .unwrap(),
+        );
         assert_eq!(program, "pacman");
         assert!(args.is_empty());
     }
@@ -92,9 +112,10 @@ mod tests {
     fn command_wraps_sudo() {
         let (program, args) = prog(
             &ExecutionContext {
-                privilege: Some(vec!["sudo".into()]),
+                privilege: Privilege::Elevate(vec!["sudo".into()]),
             }
-            .build_command("pacman"),
+            .build_command("pacman")
+            .unwrap(),
         );
         assert_eq!(program, "sudo");
         assert_eq!(args, vec!["pacman"]);
@@ -104,11 +125,26 @@ mod tests {
     fn command_wraps_gui_pkexec_with_flags() {
         let (program, args) = prog(
             &ExecutionContext {
-                privilege: Some(vec!["pkexec".into(), "--user".into(), "root".into()]),
+                privilege: Privilege::Elevate(vec![
+                    "pkexec".into(),
+                    "--user".into(),
+                    "root".into(),
+                ]),
             }
-            .build_command("pacman"),
+            .build_command("pacman")
+            .unwrap(),
         );
         assert_eq!(program, "pkexec");
         assert_eq!(args, vec!["--user", "root", "pacman"]);
+    }
+
+    #[test]
+    fn empty_elevate_argv_is_rejected() {
+        let err = ExecutionContext {
+            privilege: Privilege::Elevate(Vec::new()),
+        }
+        .build_command("pacman")
+        .unwrap_err();
+        assert!(err.contains("empty"), "got: {err}");
     }
 }

@@ -83,12 +83,27 @@ pub fn configured_privilege(
     flag: &Option<Vec<String>>,
     config: &Config,
 ) -> Result<Vec<String>, String> {
+    configured_privilege_from(
+        flag,
+        std::env::var("PACNIX_PRIVILEGE").ok().as_deref(),
+        config,
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+/// Pure variant of [`configured_privilege`] with injected env and PATH, so
+/// tests never mutate process-global environment.
+pub fn configured_privilege_from(
+    flag: &Option<Vec<String>>,
+    env_privilege: Option<&str>,
+    config: &Config,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<Vec<String>, String> {
     if let Some(argv) = flag {
         return reject_empty("--privilege", argv.clone());
     }
-    if let Ok(value) = std::env::var("PACNIX_PRIVILEGE") {
-        let argv = split_words(&value);
-        return reject_empty("PACNIX_PRIVILEGE", argv);
+    if let Some(value) = env_privilege {
+        return reject_empty("PACNIX_PRIVILEGE", split_words(value));
     }
     if let Some(command) = config.privilege.as_ref().and_then(|p| p.command.clone()) {
         let argv = PrivilegeCommand::argv(command);
@@ -96,11 +111,17 @@ pub fn configured_privilege(
             eprintln!(
                 "pacnix: warning: empty privilege.command in config; falling back to detection"
             );
-            return Ok(detect_privilege());
+            return Ok(match detect_privilege_in(path) {
+                Some(tool) => vec![tool.to_string()],
+                None => vec!["sudo".to_string()],
+            });
         }
         return Ok(argv);
     }
-    Ok(detect_privilege())
+    match detect_privilege_in(path) {
+        Some(tool) => Ok(vec![tool.to_string()]),
+        None => Ok(vec!["sudo".to_string()]),
+    }
 }
 
 fn reject_empty(source: &str, argv: Vec<String>) -> Result<Vec<String>, String> {
@@ -110,15 +131,6 @@ fn reject_empty(source: &str, argv: Vec<String>) -> Result<Vec<String>, String> 
         ))
     } else {
         Ok(argv)
-    }
-}
-
-/// Picks the first privilege tool present in PATH. Preference order matters:
-/// sudo-rs, then plain sudo, then GUI pkexec, then doas.
-fn detect_privilege() -> Vec<String> {
-    match detect_privilege_in(std::env::var_os("PATH").as_deref()) {
-        Some(tool) => vec![tool.to_string()],
-        None => vec!["sudo".to_string()],
     }
 }
 
@@ -190,18 +202,19 @@ mod tests {
     #[test]
     fn empty_env_is_rejected() {
         let config = Config::default();
-        std::env::set_var("PACNIX_PRIVILEGE", "   ");
-        let result = configured_privilege(&None, &config);
-        std::env::remove_var("PACNIX_PRIVILEGE");
+        let result = configured_privilege_from(&None, Some("   "), &config, None);
         assert!(result.is_err(), "empty env must be rejected");
         assert!(result.unwrap_err().contains("PACNIX_PRIVILEGE"));
+        let ok = configured_privilege_from(&None, Some("sudo-rs"), &config, None).unwrap();
+        assert_eq!(ok, vec!["sudo-rs"]);
     }
 
     #[test]
     fn defaults_to_detected_tool() {
         let config = Config::default();
-        let argv = configured_privilege(&None, &config).unwrap();
-        assert_eq!(argv, detect_privilege(), "fallback must detect a tool");
+        let path = std::env::var_os("PATH").unwrap();
+        let argv = configured_privilege_from(&None, None, &config, Some(&path)).unwrap();
+        assert_eq!(argv[0], "sudo-rs", "detection must find sudo-rs in PATH");
         assert!(
             ["sudo-rs", "sudo", "pkexec", "doas"].contains(&argv[0].as_str()),
             "detected tool must be a known privilege tool"

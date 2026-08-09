@@ -9,8 +9,8 @@ use pacnix_backend_aur::AurBackend;
 use pacnix_backend_nix::NixBackend;
 use pacnix_core::{
     BackendPlan, Candidate, Command, ExecutionBatch, ExecutionContext, Executor, InstalledPackage,
-    PackageBackend, RankedCandidate, ResolutionDecision, Resolver, Source, Storage, TargetSpec,
-    TransactionPlan,
+    PackageBackend, Privilege, RankedCandidate, ResolutionDecision, Resolver, Source, Storage,
+    TargetSpec, TransactionPlan,
 };
 
 mod config;
@@ -353,7 +353,11 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
                     backend: p.backend,
                     plan: &p.plan,
                     ctx: ExecutionContext {
-                        privilege: p.plan.requires_privilege.then(|| privilege.clone()),
+                        privilege: if p.plan.requires_privilege {
+                            Privilege::Elevate(privilege.clone())
+                        } else {
+                            Privilege::Direct
+                        },
                     },
                 })
                 .collect(),
@@ -366,7 +370,13 @@ fn run_install(resolver: &Resolver, storage: &Storage, targets: &[TargetSpec], o
         if report.error.is_none() {
             if !report.receipts.is_empty() {
                 println!(":: Installed {}", item.candidate.name);
-                let bins = installed_binaries(&item.candidate.name);
+                let mut bins: Vec<String> = Vec::new();
+                for receipt in &report.receipts {
+                    if receipt.installed_backend == "alpm" {
+                        bins.extend(installed_binaries(&receipt.package_name));
+                    }
+                }
+                bins.dedup();
                 if !bins.is_empty() {
                     println!("   bin: {}", bins.join(", "));
                 }
@@ -558,7 +568,11 @@ fn execute_plans(
                 backend: *backend,
                 plan,
                 ctx: ExecutionContext {
-                    privilege: plan.requires_privilege.then(|| privilege.to_vec()),
+                    privilege: if plan.requires_privilege {
+                        Privilege::Elevate(privilege.to_vec())
+                    } else {
+                        Privilege::Direct
+                    },
                 },
             })
             .collect(),

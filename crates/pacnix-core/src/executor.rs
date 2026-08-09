@@ -153,6 +153,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::backend::Privilege;
     use crate::model::{Candidate, InstalledPackage, Source, TransactionOperation};
 
     struct ScriptBackend {
@@ -220,7 +221,9 @@ mod tests {
     }
 
     fn ctx() -> ExecutionContext {
-        ExecutionContext { privilege: None }
+        ExecutionContext {
+            privilege: Privilege::Direct,
+        }
     }
 
     fn tmp_storage(name: &str) -> Storage {

@@ -220,7 +220,7 @@ fn run_pacman(args: &[&str]) -> Result<String, String> {
 }
 
 fn run_pacman_elevated(ctx: &ExecutionContext, args: &[&str]) -> Result<(), String> {
-    let mut command = ctx.build_command(PACMAN);
+    let mut command = ctx.build_command(PACMAN)?;
     let status = command
         .args(args)
         .status()

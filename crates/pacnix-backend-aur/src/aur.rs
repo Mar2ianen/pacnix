@@ -442,7 +442,7 @@ impl PackageBackend for AurBackend {
                 if deps.is_empty() {
                     return Ok(());
                 }
-                let mut command = ctx.build_command("pacman");
+                let mut command = ctx.build_command("pacman")?;
                 command
                     .arg("-S")
                     .arg("--needed")
@@ -479,7 +479,7 @@ impl PackageBackend for AurBackend {
                 }
                 let artifact = built_artifact(&dir, package)?;
                 let status = ctx
-                    .build_command("pacman")
+                    .build_command("pacman")?
                     .args(["-U", "--noconfirm"])
                     .arg(&artifact)
                     .status()
