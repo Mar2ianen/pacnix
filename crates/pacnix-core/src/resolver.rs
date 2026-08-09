@@ -270,6 +270,8 @@ mod tests {
             name: name.to_string(),
             version: None,
             description: None,
+            package_base: None,
+            url_path: None,
         }
     }
 
@@ -427,6 +429,8 @@ mod tests {
                 name: "hiddify-bin".into(),
                 version: None,
                 description: Some("proxy for hiddify".into()),
+                package_base: Some("hiddify-bin".into()),
+                url_path: None,
             }]),
         })]);
         match resolver.resolve("hiddify proxy") {

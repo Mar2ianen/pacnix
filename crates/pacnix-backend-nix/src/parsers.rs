@@ -78,6 +78,8 @@ pub fn parse_search(output: &str) -> Result<Vec<Candidate>, String> {
             name,
             version: hit.version,
             description: hit.description,
+            package_base: None,
+            url_path: None,
         });
     }
     Ok(candidates)

@@ -25,6 +25,8 @@ pub struct Candidate {
     pub name: String,
     pub version: Option<String>,
     pub description: Option<String>,
+    pub package_base: Option<String>,
+    pub url_path: Option<String>,
 }
 
 impl Candidate {
@@ -38,6 +40,7 @@ pub enum Provenance {
     Unknown,
     SyncKnown,
     Foreign,
+    Inferred { source: String },
     PacnixInstalled { source: String },
 }
 
@@ -78,12 +81,42 @@ pub struct TransactionPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionOperation {
-    FetchAurSource { package: String },
-    InstallPackage { package: String },
-    RemovePackage { package: String },
-    UpgradePackage { package: String },
-    ProfileInstall { profile: String, attr: String },
-    ProfileRemove { profile: String, attr: String },
-    ProfileUpgrade { profile: String, element: String },
-    SystemUpgrade { system: String },
+    FetchAurSource {
+        package: String,
+        package_base: String,
+        url_path: Option<String>,
+    },
+    InstallAurBuildDeps {
+        package: String,
+    },
+    BuildAurPackage {
+        package: String,
+    },
+    InstallAurPackage {
+        package: String,
+    },
+    InstallPackage {
+        package: String,
+    },
+    RemovePackage {
+        package: String,
+    },
+    UpgradePackage {
+        package: String,
+    },
+    ProfileInstall {
+        profile: String,
+        attr: String,
+    },
+    ProfileRemove {
+        profile: String,
+        attr: String,
+    },
+    ProfileUpgrade {
+        profile: String,
+        element: String,
+    },
+    SystemUpgrade {
+        system: String,
+    },
 }

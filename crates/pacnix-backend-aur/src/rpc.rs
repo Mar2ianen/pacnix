@@ -22,6 +22,8 @@ pub struct AurPackage {
     pub description: Option<String>,
     #[serde(rename = "URLPath")]
     pub url_path: Option<String>,
+    #[serde(rename = "PackageBase")]
+    pub package_base: Option<String>,
 }
 
 pub fn existing_names(names: &[String]) -> Result<Vec<String>, String> {
@@ -69,6 +71,8 @@ pub fn to_candidates(packages: Vec<AurPackage>) -> Vec<Candidate> {
             name: p.name,
             version: p.version,
             description: p.description,
+            package_base: p.package_base,
+            url_path: p.url_path,
         })
         .collect()
 }

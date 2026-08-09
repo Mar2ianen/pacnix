@@ -186,6 +186,8 @@ mod tests {
             name: "ripgrep".into(),
             version: Some("14.1.1".into()),
             description: None,
+            package_base: None,
+            url_path: None,
         };
         let plan = backend.plan_install(&cand).unwrap();
         assert_eq!(

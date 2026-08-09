@@ -320,6 +320,8 @@ mod tests {
             name: "foo-bin".into(),
             version: Some("1.2-3".into()),
             description: None,
+            package_base: None,
+            url_path: None,
         };
         let plan = backend.plan_install(&cand).unwrap();
         assert_eq!(plan.backend_ref, "chaotic-aur/foo-bin");

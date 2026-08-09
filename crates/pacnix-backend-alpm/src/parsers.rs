@@ -80,6 +80,8 @@ pub fn parse_search(output: &str) -> Vec<Candidate> {
             name: name.to_string(),
             version: Some(rest.to_string()),
             description,
+            package_base: None,
+            url_path: None,
         });
     }
     candidates

@@ -9,18 +9,25 @@ use crate::rpc::{self, AurPackage};
 
 pub struct AurBackend;
 
-fn snapshot_url(package: &str) -> String {
-    format!("https://aur.archlinux.org/cgit/aur.git/snapshot/{package}.tar.gz")
+fn snapshot_url(package_base: &str, url_path: Option<&str>) -> String {
+    match url_path {
+        Some(path) => format!("https://aur.archlinux.org{path}"),
+        None => format!("https://aur.archlinux.org/cgit/aur.git/snapshot/{package_base}.tar.gz"),
+    }
 }
 
 fn build_dir(package: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("pacnix-aur-{package}"))
 }
 
-fn try_download_snapshot(tarball: &std::path::Path, package: &str) -> Result<(), String> {
+fn try_download_snapshot(
+    tarball: &std::path::Path,
+    package_base: &str,
+    url_path: Option<&str>,
+) -> Result<(), String> {
     let agent = ureq::Agent::new_with_defaults();
     let response = agent
-        .get(&snapshot_url(package))
+        .get(&snapshot_url(package_base, url_path))
         .call()
         .map_err(|e| format!("AUR snapshot download failed: {e}"))?;
     let bytes = response
@@ -36,49 +43,59 @@ fn try_download_snapshot(tarball: &std::path::Path, package: &str) -> Result<(),
     std::fs::write(tarball, bytes).map_err(|e| e.to_string())
 }
 
-fn clone_snapshot(package: &str, dir: &std::path::Path) -> Result<(), String> {
+fn clone_snapshot(package_base: &str, dir: &std::path::Path) -> Result<(), String> {
     if dir.exists() {
         std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let status = std::process::Command::new("git")
         .args(["clone", "--depth", "1", "--single-branch"])
-        .arg(format!("https://aur.archlinux.org/{package}.git"))
+        .arg(format!("https://aur.archlinux.org/{package_base}.git"))
         .arg(dir)
         .status()
         .map_err(|e| format!("failed to run git: {e}"))?;
     if !status.success() {
-        return Err(format!("failed to clone AUR repository {package}"));
+        return Err(format!("failed to clone AUR repository {package_base}"));
     }
     if !dir.join("PKGBUILD").exists() {
-        return Err(format!("AUR repository {package} has no PKGBUILD"));
+        return Err(format!("AUR repository {package_base} has no PKGBUILD"));
     }
     Ok(())
 }
 
-fn fetch_snapshot(package: &str) -> Result<std::path::PathBuf, String> {
+fn fetch_snapshot(
+    package: &str,
+    package_base: &str,
+    url_path: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
     let dir = build_dir(package);
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
     }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let tarball = dir.join(format!("{package}.tar.gz"));
-    let mut last_err = String::new();
+    let tarball = dir.join(format!("{package_base}.tar.gz"));
+    let mut last_err = None;
     for attempt in 1..=3 {
-        match try_download_snapshot(&tarball, package) {
-            Ok(()) => break,
+        match try_download_snapshot(&tarball, package_base, url_path) {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
             Err(e) => {
-                last_err = e;
+                last_err = Some(e);
                 if attempt < 3 {
                     std::thread::sleep(std::time::Duration::from_millis(500 * attempt as u64));
                 }
             }
         }
     }
-    if !last_err.is_empty() {
-        match clone_snapshot(package, &dir) {
-            Ok(()) => return Ok(dir),
-            Err(e) => return Err(format!("{last_err}; git clone fallback: {e}")),
-        }
+    if last_err.is_some() {
+        return match clone_snapshot(package_base, &dir) {
+            Ok(()) => Ok(dir),
+            Err(e) => Err(format!(
+                "{}; git clone fallback: {e}",
+                last_err.unwrap_or_default()
+            )),
+        };
     }
     let status = std::process::Command::new("tar")
         .arg("-xzf")
@@ -88,18 +105,53 @@ fn fetch_snapshot(package: &str) -> Result<std::path::PathBuf, String> {
         .status()
         .map_err(|e| format!("failed to run tar: {e}"))?;
     if !status.success() {
-        return Err(format!("failed to extract AUR snapshot {package}"));
+        return Err(format!(
+            "failed to extract AUR snapshot {package_base} for {package}"
+        ));
     }
     std::fs::remove_file(&tarball).ok();
     if !dir.join("PKGBUILD").exists() {
-        return Err(format!("AUR snapshot {package} has no PKGBUILD"));
+        return Err(format!("AUR snapshot {package_base} has no PKGBUILD"));
     }
     Ok(dir)
 }
 
+fn build_dependencies(dir: &std::path::Path) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("makepkg")
+        .args(["--printsrcinfo"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to run makepkg --printsrcinfo: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "makepkg --printsrcinfo failed (status {})",
+            output.status
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut deps: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("depends = ")
+            .or_else(|| trimmed.strip_prefix("makedepends = "))
+        {
+            let name = rest
+                .split(['>', '<', '=', '!'])
+                .next()
+                .unwrap_or(rest)
+                .trim();
+            if !name.is_empty() && !deps.iter().any(|d| d == name) {
+                deps.push(name.to_string());
+            }
+        }
+    }
+    Ok(deps)
+}
+
 fn build_package(package: &str, dir: &std::path::Path) -> Result<(), String> {
     let status = std::process::Command::new("makepkg")
-        .args(["--noconfirm", "--syncdeps", "--needed"])
+        .args(["--noconfirm", "--needed"])
         .current_dir(dir)
         .status()
         .map_err(|e| format!("failed to run makepkg: {e}"))?;
@@ -109,8 +161,25 @@ fn build_package(package: &str, dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn built_artifact(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    std::fs::read_dir(dir)
+fn artifact_pkgname(path: &std::path::Path) -> Result<Option<String>, String> {
+    let output = std::process::Command::new("tar")
+        .args(["-xzf", "-O"])
+        .arg(path)
+        .arg(".PKGINFO")
+        .output()
+        .map_err(|e| format!("failed to inspect artifact {path:?}: {e}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("pkgname = "))
+        .map(|name| name.to_string()))
+}
+
+fn built_artifact(dir: &std::path::Path, package: &str) -> Result<std::path::PathBuf, String> {
+    let candidates: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| e.to_string())?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
@@ -120,6 +189,14 @@ fn built_artifact(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
                 || name.ends_with(".pkg.tar.xz")
                 || name.ends_with(".pkg.tar")
         })
+        .collect();
+    for path in &candidates {
+        if artifact_pkgname(path)? == Some(package.to_string()) {
+            return Ok(path.clone());
+        }
+    }
+    candidates
+        .into_iter()
         .max()
         .ok_or_else(|| "no built package artifact found".into())
 }
@@ -166,17 +243,11 @@ fn installed_desc(package: &str) -> Result<Option<(String, Option<String>, i64)>
             Ok(text) => text,
             Err(_) => continue,
         };
-        let (name, version) = parse_desc_fields(&desc);
+        let (name, version, installed_at) = parse_desc_fields(&desc);
         if name.as_deref() == Some(package) {
-            let installed_at = std::fs::metadata(&desc_path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
+            let Some(installed_at) = installed_at else {
+                continue;
+            };
             return Ok(Some((
                 name.unwrap_or_else(|| package.to_string()),
                 version,
@@ -187,9 +258,10 @@ fn installed_desc(package: &str) -> Result<Option<(String, Option<String>, i64)>
     Ok(None)
 }
 
-fn parse_desc_fields(desc: &str) -> (Option<String>, Option<String>) {
+fn parse_desc_fields(desc: &str) -> (Option<String>, Option<String>, Option<i64>) {
     let mut name = None;
     let mut version = None;
+    let mut installed_at = None;
     let lines: Vec<&str> = desc.lines().collect();
     let mut i = 0;
     while i < lines.len() {
@@ -199,6 +271,7 @@ fn parse_desc_fields(desc: &str) -> (Option<String>, Option<String>) {
             match field {
                 "%NAME%" => name = Some(value),
                 "%VERSION%" => version = Some(value),
+                "%INSTALLDATE%" => installed_at = value.parse::<i64>().ok(),
                 _ => {}
             }
             i += 2;
@@ -206,7 +279,7 @@ fn parse_desc_fields(desc: &str) -> (Option<String>, Option<String>) {
             i += 1;
         }
     }
-    (name, version)
+    (name, version, installed_at)
 }
 
 impl PackageBackend for AurBackend {
@@ -228,14 +301,26 @@ impl PackageBackend for AurBackend {
     }
 
     fn plan_install(&self, target: &Candidate) -> Result<TransactionPlan, String> {
+        let package_base = target
+            .package_base
+            .clone()
+            .unwrap_or_else(|| target.name.clone());
         Ok(TransactionPlan {
             backend_ref: target.backend_ref.clone(),
             name: target.name.clone(),
             operations: vec![
                 TransactionOperation::FetchAurSource {
                     package: target.name.clone(),
+                    package_base: package_base.clone(),
+                    url_path: target.url_path.clone(),
                 },
-                TransactionOperation::InstallPackage {
+                TransactionOperation::InstallAurBuildDeps {
+                    package: target.name.clone(),
+                },
+                TransactionOperation::BuildAurPackage {
+                    package: target.name.clone(),
+                },
+                TransactionOperation::InstallAurPackage {
                     package: target.name.clone(),
                 },
             ],
@@ -296,16 +381,63 @@ impl PackageBackend for AurBackend {
         ctx: &ExecutionContext,
     ) -> Result<(), String> {
         match op {
-            TransactionOperation::FetchAurSource { package } => fetch_snapshot(package).map(|_| ()),
-            TransactionOperation::InstallPackage { package } => {
+            TransactionOperation::FetchAurSource {
+                package,
+                package_base,
+                url_path,
+            } => fetch_snapshot(package, package_base, url_path.as_deref()).map(|_| ()),
+            TransactionOperation::InstallAurBuildDeps { package } => {
                 let dir = build_dir(package);
                 if !dir.join("PKGBUILD").exists() {
                     return Err(format!(
                         "{package}: PKGBUILD not fetched yet; install AUR via pacnix install"
                     ));
                 }
-                build_package(package, &dir)?;
-                let artifact = built_artifact(&dir)?;
+                let deps = build_dependencies(&dir)?;
+                if deps.is_empty() {
+                    return Ok(());
+                }
+                let mut command = std::process::Command::new("pacman");
+                if ctx.use_sudo {
+                    let mut sudo = std::process::Command::new("sudo");
+                    sudo.arg("pacman");
+                    command = sudo;
+                }
+                command
+                    .arg("-S")
+                    .arg("--needed")
+                    .arg("--asdeps")
+                    .arg("--noconfirm");
+                for dep in &deps {
+                    command.arg(dep);
+                }
+                let status = command
+                    .status()
+                    .map_err(|e| format!("failed to run pacman -S: {e}"))?;
+                if !status.success() {
+                    return Err(format!(
+                        "installing build deps for {package} failed (status {status})"
+                    ));
+                }
+                Ok(())
+            }
+            TransactionOperation::BuildAurPackage { package } => {
+                let dir = build_dir(package);
+                if !dir.join("PKGBUILD").exists() {
+                    return Err(format!(
+                        "{package}: PKGBUILD not fetched yet; install AUR via pacnix install"
+                    ));
+                }
+                build_package(package, &dir)
+            }
+            TransactionOperation::InstallAurPackage { package } => {
+                let dir = build_dir(package);
+                if !dir.join("PKGBUILD").exists() {
+                    return Err(format!(
+                        "{package}: PKGBUILD not fetched yet; install AUR via pacnix install"
+                    ));
+                }
+                let artifact = built_artifact(&dir, package)?;
                 let mut command = std::process::Command::new("pacman");
                 if ctx.use_sudo {
                     let mut sudo = std::process::Command::new("sudo");
@@ -334,23 +466,65 @@ mod tests {
     #[test]
     fn parses_desc_fields() {
         let desc = "%NAME%\nmutt-wizard\n\n%VERSION%\n3.3.1-1\n\n%INSTALLDATE%\n1754702000\n";
-        let (name, version) = parse_desc_fields(desc);
+        let (name, version, installed_at) = parse_desc_fields(desc);
         assert_eq!(name.as_deref(), Some("mutt-wizard"));
         assert_eq!(version.as_deref(), Some("3.3.1-1"));
-        let (name, version) = parse_desc_fields("%NAME%\nfoo\n%VERSION%-\n");
+        assert_eq!(installed_at, Some(1754702000));
+        let (name, version, installed_at) = parse_desc_fields("%NAME%\nfoo\n%VERSION%-\n");
         assert_eq!(name.as_deref(), Some("foo"));
         assert_eq!(version, None);
+        assert_eq!(installed_at, None);
     }
 
     #[test]
-    fn snapshot_url_is_predictable() {
+    fn snapshot_url_uses_url_path_or_base() {
         assert_eq!(
-            snapshot_url("hiddify"),
+            snapshot_url("hiddify", None),
             "https://aur.archlinux.org/cgit/aur.git/snapshot/hiddify.tar.gz"
+        );
+        assert_eq!(
+            snapshot_url("nx", Some("/cgit/aur.git/snapshot/nx.tar.gz")),
+            "https://aur.archlinux.org/cgit/aur.git/snapshot/nx.tar.gz"
         );
         assert_eq!(
             build_dir("hiddify").file_name().unwrap(),
             "pacnix-aur-hiddify"
+        );
+    }
+
+    #[test]
+    fn split_package_uses_base_for_fetch_and_name_for_artifact() {
+        let plan = AurBackend
+            .plan_install(&Candidate {
+                source: Source::Aur,
+                provider: "aur".into(),
+                backend_ref: "aur/nxproxy".into(),
+                name: "nxproxy".into(),
+                version: Some("3.5.2-1".into()),
+                description: None,
+                package_base: Some("nx".into()),
+                url_path: Some("/cgit/aur.git/snapshot/nx.tar.gz".into()),
+            })
+            .unwrap();
+        let ops = &plan.operations;
+        assert!(matches!(
+            &ops[0],
+            TransactionOperation::FetchAurSource {
+                package,
+                package_base,
+                url_path,
+            } if package == "nxproxy"
+                && package_base == "nx"
+                && url_path.as_deref() == Some("/cgit/aur.git/snapshot/nx.tar.gz")
+        ));
+        assert!(
+            matches!(&ops[1], TransactionOperation::InstallAurBuildDeps { package } if package == "nxproxy")
+        );
+        assert!(
+            matches!(&ops[2], TransactionOperation::BuildAurPackage { package } if package == "nxproxy")
+        );
+        assert!(
+            matches!(&ops[3], TransactionOperation::InstallAurPackage { package } if package == "nxproxy")
         );
     }
 

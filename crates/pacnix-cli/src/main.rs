@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
+use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
@@ -160,6 +161,9 @@ fn run(resolver: &Resolver, storage: &Storage, command: Command, opts: &CliOptio
                 let mark = match &pkg.provenance {
                     pacnix_core::Provenance::SyncKnown => String::new(),
                     pacnix_core::Provenance::Foreign => " (foreign)".to_string(),
+                    pacnix_core::Provenance::Inferred { source } => {
+                        format!(" (inferred: {source})")
+                    }
                     pacnix_core::Provenance::PacnixInstalled { source } => {
                         format!(" (via pacnix: {source})")
                     }
@@ -706,76 +710,36 @@ fn signed_total(deltas: &[Option<i64>]) -> Option<i64> {
     (!known.is_empty()).then(|| known.iter().sum())
 }
 
-fn tag_foreign_from_aur(resolver: &Resolver, storage: &Storage) {
-    if !resolver
-        .backends()
-        .iter()
-        .any(|b| b.source() == Source::Aur)
-    {
-        return;
-    }
-    let pending = match storage.foreign_instances() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("pacnix: {e}");
-            return;
+fn aur_exact_names(
+    pkgs_by_backend: &[(&dyn PackageBackend, Option<Vec<InstalledPackage>>)],
+) -> HashSet<String> {
+    let mut foreign: Vec<String> = Vec::new();
+    for (backend, pkgs) in pkgs_by_backend {
+        if backend.source() != Source::Alpm {
+            continue;
         }
-    };
-    if pending.is_empty() {
-        return;
+        let Some(pkgs) = pkgs else {
+            continue;
+        };
+        for pkg in pkgs {
+            if pkg.provenance == pacnix_core::Provenance::Foreign && pkg.installed_at.is_some() {
+                foreign.push(pkg.name.clone());
+            }
+        }
     }
-    let names: Vec<String> = pending.iter().map(|(n, _, _, _)| n.clone()).collect();
-    let existing = match pacnix_backend_aur::rpc::existing_names(&names) {
-        Ok(v) => v,
+    if foreign.is_empty() {
+        return HashSet::new();
+    }
+    match pacnix_backend_aur::rpc::existing_names(&foreign) {
+        Ok(names) => names.into_iter().collect(),
         Err(e) => {
             eprintln!("pacnix: aur rpc: {e}");
-            return;
+            HashSet::new()
         }
-    };
-    let mut tagged = 0usize;
-    for (name, installed_backend_ref, version, installed_at) in pending {
-        let installed_at = match installed_at {
-            Some(t) => t,
-            None => continue,
-        };
-        if !existing.iter().any(|n| n == &name) {
-            continue;
-        }
-        if storage
-            .known_source_for(
-                &name,
-                "alpm",
-                &installed_backend_ref,
-                version.as_deref(),
-                Some(installed_at),
-            )
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            continue;
-        }
-        let receipt = pacnix_core::model::InstallReceipt {
-            package_name: name.clone(),
-            installed_backend: "alpm".into(),
-            installed_backend_ref: installed_backend_ref.clone(),
-            source: "aur".into(),
-            source_ref: format!("aur/{name}"),
-            version: version.clone(),
-            installed_at,
-        };
-        match storage.record_receipt(&receipt) {
-            Ok(()) => tagged += 1,
-            Err(e) => eprintln!("pacnix: {e}"),
-        }
-    }
-    if tagged > 0 {
-        println!("reconcile: tagged {tagged} foreign packages as aur-sourced");
     }
 }
 
 fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
-    tag_foreign_from_aur(resolver, storage);
     let generation = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -783,16 +747,35 @@ fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
     let mut count = 0;
     let mut removed_total = 0;
     let mut errors = Vec::new();
+    let mut inferred = 0usize;
+
+    let mut scanned: Vec<(&dyn PackageBackend, Option<Vec<InstalledPackage>>)> = Vec::new();
     for backend in resolver.backends() {
-        let pkgs = match backend.installed() {
-            Ok(pkgs) => pkgs,
+        let backend: &dyn PackageBackend = backend.as_ref();
+        match backend.installed() {
+            Ok(pkgs) => scanned.push((backend, Some(pkgs))),
             Err(e) => {
                 errors.push(format!("{}: {e}", backend.name()));
-                continue;
+                scanned.push((backend, None));
             }
+        }
+    }
+    let aur_names = if resolver
+        .backends()
+        .iter()
+        .any(|b| b.source() == Source::Aur)
+    {
+        aur_exact_names(&scanned)
+    } else {
+        HashSet::new()
+    };
+    for (backend, pkgs) in &scanned {
+        let Some(pkgs) = pkgs else {
+            continue;
         };
         let mut upserts: Vec<InstalledPackage> = Vec::new();
-        for mut pkg in pkgs {
+        for pkg in pkgs.iter() {
+            let mut pkg = pkg.clone();
             if pkg.provenance == pacnix_core::Provenance::Foreign && pkg.installed_at.is_some() {
                 if let Ok(Some(source)) = storage.known_source_for(
                     &pkg.name,
@@ -802,6 +785,11 @@ fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
                     pkg.installed_at,
                 ) {
                     pkg.provenance = pacnix_core::Provenance::PacnixInstalled { source };
+                } else if backend.source() == Source::Alpm && aur_names.contains(&pkg.name) {
+                    pkg.provenance = pacnix_core::Provenance::Inferred {
+                        source: "aur".into(),
+                    };
+                    inferred += 1;
                 }
             } else if pkg.provenance == pacnix_core::Provenance::Unknown
                 && pkg.installed_at.is_none()
@@ -823,6 +811,9 @@ fn reconcile(resolver: &Resolver, storage: &Storage) -> (usize, usize) {
             Ok(removed) => removed_total += removed,
             Err(e) => errors.push(format!("storage ({}): {e}", backend.name())),
         }
+    }
+    if inferred > 0 {
+        println!("reconcile: inferred {inferred} foreign packages to be aur");
     }
     for e in &errors {
         eprintln!("pacnix: {e}");

@@ -30,6 +30,8 @@ fn op_uses_pacman_db(op: &TransactionOperation) -> bool {
     matches!(
         op,
         TransactionOperation::InstallPackage { .. }
+            | TransactionOperation::InstallAurBuildDeps { .. }
+            | TransactionOperation::InstallAurPackage { .. }
             | TransactionOperation::RemovePackage { .. }
             | TransactionOperation::UpgradePackage { .. }
             | TransactionOperation::SystemUpgrade { .. }
