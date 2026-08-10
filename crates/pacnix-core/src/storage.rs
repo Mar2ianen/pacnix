@@ -343,13 +343,21 @@ impl Storage {
             .map_err(|e| e.to_string())
     }
 
+    /// Names of installed AUR packages: those pacnix installed (receipts)
+    /// plus foreign packages reconciled as AUR (inferred instances).
     pub fn aur_installed_names(&self) -> Result<Vec<String>, String> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT DISTINCT package_name FROM install_receipts
-                 WHERE source = 'aur'
-                 ORDER BY package_name",
+                "SELECT DISTINCT package_name FROM (
+                    SELECT package_name FROM install_receipts WHERE source = 'aur'
+                    UNION
+                    SELECT p.canonical_name FROM installed_instances ii
+                    JOIN packages p ON p.id = ii.package_id
+                    WHERE ii.backend = 'alpm'
+                      AND ii.provenance = 'inferred'
+                      AND ii.provenance_source = 'aur'
+                 ) ORDER BY package_name",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -747,6 +755,44 @@ mod tests {
             .unwrap();
         let names = storage.aur_installed_names().unwrap();
         assert_eq!(names, vec!["bar", "foo"]);
+    }
+
+    #[test]
+    fn aur_installed_names_include_inferred_aur_instances() {
+        let storage = tmp_db();
+        let inferred = crate::InstalledPackage {
+            source: crate::Source::Alpm,
+            backend_ref: "extra/foo-bin".into(),
+            name: "foo-bin".into(),
+            version: Some("2.0-1".into()),
+            scope: None,
+            installed_at: None,
+            provenance: crate::Provenance::Inferred {
+                source: "aur".into(),
+            },
+        };
+        let foreign = crate::InstalledPackage {
+            name: "other-foreign".into(),
+            backend_ref: "extra/other-foreign".into(),
+            provenance: crate::Provenance::Foreign,
+            ..inferred.clone()
+        };
+        storage
+            .upsert_and_sweep(&[inferred, foreign], 1, "alpm")
+            .unwrap();
+        storage
+            .record_receipt(&crate::InstallReceipt {
+                package_name: "handmade".into(),
+                installed_backend: "aur".into(),
+                installed_backend_ref: "aur/handmade".into(),
+                source: "aur".into(),
+                source_ref: "aur/handmade".into(),
+                version: Some("1.0-1".into()),
+                installed_at: 1,
+            })
+            .unwrap();
+        let names = storage.aur_installed_names().unwrap();
+        assert_eq!(names, vec!["foo-bin", "handmade"]);
     }
 
     #[test]
