@@ -163,11 +163,11 @@ fn to_targets(args: &[String]) -> Vec<TargetSpec> {
         .collect()
 }
 
-fn default_registry() -> Vec<Box<dyn PackageBackend>> {
+fn default_registry(nix_profile: Option<std::path::PathBuf>) -> Vec<Box<dyn PackageBackend>> {
     vec![
         Box::new(AlpmBackend),
         Box::new(AurBackend),
-        Box::new(NixBackend),
+        Box::new(NixBackend::new(nix_profile)),
     ]
 }
 
@@ -191,7 +191,14 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let resolver = Resolver::new(default_registry());
+    let config = config::load();
+    let resolver = Resolver::new(default_registry(
+        config
+            .nix
+            .as_ref()
+            .and_then(|n| n.profile.clone())
+            .map(PathBuf::from),
+    ));
     match open_storage() {
         Ok(storage) => run(&resolver, &storage, command, &opts),
         Err(e) => {
@@ -540,6 +547,21 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
                     Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
                 },
                 Err(e) => eprintln!("pacnix: storage: {e}"),
+            }
+            continue;
+        }
+        if backend.source() == Source::Nix {
+            match backend.outdated(&[]) {
+                Ok(candidates) if candidates.is_empty() => {}
+                Ok(candidates) => match backend.plan_upgrade_chain(&candidates) {
+                    Ok(plans) if plans.is_empty() => {}
+                    Ok(plans) => planned.push(PlannedUpgrade {
+                        backend: backend.as_ref(),
+                        plans,
+                    }),
+                    Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
+                },
+                Err(e) => eprintln!("pacnix: {}: {e}", backend.name()),
             }
             continue;
         }

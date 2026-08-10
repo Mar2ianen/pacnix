@@ -8,6 +8,16 @@ use serde::Deserialize;
 pub struct Config {
     #[serde(default)]
     pub privilege: Option<PrivilegeConfig>,
+    #[serde(default)]
+    pub nix: Option<NixConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NixConfig {
+    /// Nix profile path to operate on; when absent the default profile is
+    /// used and never mixed with custom ones.
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

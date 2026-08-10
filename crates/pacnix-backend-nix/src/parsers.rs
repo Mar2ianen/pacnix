@@ -9,6 +9,18 @@ struct ProfileList {
     elements: serde_json::Map<String, serde_json::Value>,
 }
 
+/// A single element of `nix profile list --json` with the fields needed to
+/// identify it for upgrades: the element name (key), the original flake URL,
+/// the locked URL (embedding the pinned revision) and the store paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileElement {
+    pub name: String,
+    pub original_url: Option<String>,
+    pub locked_url: Option<String>,
+    pub store_path: Option<String>,
+    pub attr_path: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct SearchHit {
     #[serde(default)]
@@ -19,31 +31,92 @@ struct SearchHit {
     description: Option<String>,
 }
 
-pub fn parse_profile_list(output: &str) -> Result<Vec<InstalledPackage>, String> {
+/// Parses `nix profile list --json` into the raw elements, keeping the
+/// flake URLs that `outdated` needs to detect newer revisions.
+pub fn parse_profile_elements(output: &str) -> Result<Vec<ProfileElement>, String> {
     let parsed: ProfileList = serde_json::from_str(output)
         .map_err(|e| format!("bad `nix profile list --json` output: {e}"))?;
-    let mut pkgs = Vec::new();
+    let mut elements = Vec::new();
     for (name, value) in &parsed.elements {
-        let store = value
+        let store_path = value
             .get("storePaths")
             .and_then(|v| v.as_array())
             .and_then(|a| a.first())
-            .and_then(|v| v.as_str());
-        let attr_path = value.get("attrPath").and_then(|v| v.as_str());
-        let source = value
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let original_url = value
             .get("originalUrl")
             .and_then(|v| v.as_str())
-            .unwrap_or("nixpkgs");
+            .map(str::to_string);
+        let locked_url = value
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let attr_path = value
+            .get("attrPath")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        elements.push(ProfileElement {
+            name: name.clone(),
+            original_url,
+            locked_url,
+            store_path,
+            attr_path,
+        });
+    }
+    Ok(elements)
+}
+
+/// Extracts the pinned revision of a `nix flake metadata <url> --json`
+/// output, used to compare against the revision in the locked element URL.
+pub fn flake_locked_rev(output: &str) -> Result<String, String> {
+    #[derive(Deserialize)]
+    struct Metadata {
+        locked: Locked,
+    }
+    #[derive(Deserialize)]
+    struct Locked {
+        #[serde(default)]
+        rev: Option<String>,
+    }
+    let parsed: Metadata = serde_json::from_str(output)
+        .map_err(|e| format!("bad `nix flake metadata --json` output: {e}"))?;
+    parsed
+        .locked
+        .rev
+        .ok_or_else(|| "nix flake metadata: locked revision missing".to_string())
+}
+
+/// Splits the pinned revision out of a locked element URL, e.g.
+/// `github:owner/repo/abc123?narHash=...` -> `abc123`. URLs without a
+/// revision component (`github:owner/repo`) return None.
+pub fn locked_rev_of(url: &str) -> Option<String> {
+    let (before, rev) = url.rsplit_once('/')?;
+    if !before.contains('/') {
+        return None;
+    }
+    let rev = rev.split('?').next()?.trim();
+    if rev.is_empty() || rev.contains(':') {
+        return None;
+    }
+    Some(rev.to_string())
+}
+
+pub fn parse_profile_list(output: &str) -> Result<Vec<InstalledPackage>, String> {
+    let mut pkgs = Vec::new();
+    for element in parse_profile_elements(output)? {
+        let store = element.store_path.as_deref();
+        let source = element.original_url.as_deref().unwrap_or("nixpkgs");
         let backend_ref = match store {
             Some(path) => path.to_string(),
-            None => format!("{source}#{name}"),
+            None => format!("{source}#{}", element.name),
         };
         pkgs.push(InstalledPackage {
             source: Source::Nix,
             backend_ref,
-            name: name.clone(),
+            name: element.name,
             version: store.and_then(split_version),
-            scope: attr_path.map(|a| a.to_string()),
+            scope: element.attr_path,
             installed_at: None,
             provenance: Provenance::Unknown,
         });
@@ -177,5 +250,72 @@ mod tests {
             Some("1.2.3".into())
         );
         assert_eq!(split_version("/nix/store/abc-foo-latest"), None);
+    }
+
+    #[test]
+    fn profile_elements_keep_flake_urls_and_attr_path() {
+        let fixture = r#"{
+            "elements": {
+                "ayugram-desktop": {
+                    "active": true,
+                    "attrPath": "packages.x86_64-linux.default",
+                    "originalUrl": "github:Mar2ianen/ayugram-desktop",
+                    "priority": 5,
+                    "storePaths": ["/nix/store/4jzf58snfrpy30fv70cvlvxj8vhbv0za-ayugram-desktop-7.0.4"],
+                    "url": "github:Mar2ianen/ayugram-desktop/cdbb75c?narHash=sha256-x"
+                }
+            },
+            "version": 3
+        }"#;
+        let elements = parse_profile_elements(fixture).unwrap();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].name, "ayugram-desktop");
+        assert_eq!(
+            elements[0].original_url.as_deref(),
+            Some("github:Mar2ianen/ayugram-desktop")
+        );
+        assert_eq!(
+            elements[0].locked_url.as_deref(),
+            Some("github:Mar2ianen/ayugram-desktop/cdbb75c?narHash=sha256-x")
+        );
+        assert_eq!(
+            elements[0].attr_path.as_deref(),
+            Some("packages.x86_64-linux.default")
+        );
+        assert_eq!(
+            elements[0].store_path.as_deref(),
+            Some("/nix/store/4jzf58snfrpy30fv70cvlvxj8vhbv0za-ayugram-desktop-7.0.4")
+        );
+    }
+
+    #[test]
+    fn locked_rev_of_splits_revision_from_url() {
+        assert_eq!(
+            locked_rev_of("github:owner/repo/cdbb75c?narHash=sha256-x"),
+            Some("cdbb75c".into())
+        );
+        assert_eq!(
+            locked_rev_of("github:owner/repo/cdbb75c"),
+            Some("cdbb75c".into())
+        );
+        assert_eq!(locked_rev_of("github:owner/repo"), None);
+        assert_eq!(locked_rev_of("flake:nixpkgs"), None);
+    }
+
+    #[test]
+    fn flake_locked_rev_parses_metadata_json() {
+        let fixture = r#"{
+            "description": "x",
+            "locked": {
+                "rev": "934c50afe8c33cdd6d403691937bd955a2d1b334",
+                "type": "github"
+            }
+        }"#;
+        assert_eq!(
+            flake_locked_rev(fixture).unwrap(),
+            "934c50afe8c33cdd6d403691937bd955a2d1b334"
+        );
+        assert!(flake_locked_rev(r#"{"locked": {}}"#).is_err());
+        assert!(flake_locked_rev("not json").is_err());
     }
 }

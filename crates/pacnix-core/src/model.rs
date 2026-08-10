@@ -116,6 +116,10 @@ pub enum TransactionOperation {
         profile: String,
         element: String,
     },
+    ProfileUpgradeMany {
+        profile: String,
+        elements: Vec<String>,
+    },
     SystemUpgrade {
         system: String,
     },
