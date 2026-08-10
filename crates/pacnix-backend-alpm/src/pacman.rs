@@ -119,6 +119,44 @@ impl PackageBackend for AlpmBackend {
         })
     }
 
+    /// Candidates among the repos that have a newer version installed
+    /// upstream, listed by `pacman -Su --print-format %r/%n`. The version
+    /// is resolved by pacman itself, so it stays unknown here.
+    fn outdated(&self, _installed: &[String]) -> Result<Vec<Candidate>, String> {
+        let output = run_pacman(&["-Su", "--print-format", "%r/%n"])?;
+        Ok(parsers::parse_upgrade_candidates(&output)
+            .into_iter()
+            .map(|(repo, name)| Candidate {
+                source: Source::Alpm,
+                provider: repo.clone(),
+                backend_ref: format!("{repo}/{name}"),
+                name,
+                version: None,
+                description: None,
+                package_base: None,
+                url_path: None,
+            })
+            .collect())
+    }
+
+    /// One system upgrade plan covering the given targets; an empty target
+    /// list plans nothing, so `-Syu` stays silent when there is nothing to
+    /// do. The name lists the concrete packages for the summary.
+    fn plan_upgrade_chain(&self, targets: &[Candidate]) -> Result<Vec<TransactionPlan>, String> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
+        Ok(vec![TransactionPlan {
+            backend_ref: "system".into(),
+            name: names.join(", "),
+            operations: vec![TransactionOperation::SystemUpgrade {
+                system: "pacman".into(),
+            }],
+            requires_privilege: true,
+        }])
+    }
+
     fn plan_upgrade_all(&self) -> Result<TransactionPlan, String> {
         Ok(TransactionPlan {
             backend_ref: "system".into(),
@@ -304,6 +342,45 @@ mod tests {
             }]
         );
         assert!(plan.requires_privilege);
+    }
+
+    #[test]
+    fn upgrade_chain_plans_system_upgrade_only_with_targets() {
+        let backend = AlpmBackend;
+        assert_eq!(backend.plan_upgrade_chain(&[]).unwrap(), Vec::new());
+        let plan = backend
+            .plan_upgrade_chain(&[
+                Candidate {
+                    source: Source::Alpm,
+                    provider: "extra".into(),
+                    backend_ref: "extra/foo".into(),
+                    name: "foo".into(),
+                    version: None,
+                    description: None,
+                    package_base: None,
+                    url_path: None,
+                },
+                Candidate {
+                    source: Source::Alpm,
+                    provider: "extra".into(),
+                    backend_ref: "extra/bar".into(),
+                    name: "bar".into(),
+                    version: None,
+                    description: None,
+                    package_base: None,
+                    url_path: None,
+                },
+            ])
+            .unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].name, "foo, bar");
+        assert_eq!(
+            plan[0].operations,
+            vec![TransactionOperation::SystemUpgrade {
+                system: "pacman".into(),
+            }]
+        );
+        assert!(plan[0].requires_privilege);
     }
 
     #[test]

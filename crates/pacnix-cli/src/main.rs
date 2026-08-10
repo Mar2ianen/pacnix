@@ -550,7 +550,7 @@ fn run_upgrade(resolver: &Resolver, storage: &Storage, opts: &CliOptions) {
             }
             continue;
         }
-        if backend.source() == Source::Nix {
+        if backend.source() == Source::Nix || backend.source() == Source::Alpm {
             match backend.outdated(&[]) {
                 Ok(candidates) if candidates.is_empty() => {}
                 Ok(candidates) => match backend.plan_upgrade_chain(&candidates) {

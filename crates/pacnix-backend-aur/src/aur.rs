@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use pacnix_core::model::{
     Candidate, InstalledPackage, Source, TransactionOperation, TransactionPlan,
@@ -244,60 +244,70 @@ fn dep_names_of(pkg: &AurPackage) -> Vec<String> {
     deps
 }
 
+type InfoFn = dyn Fn(&[String]) -> Result<Vec<AurPackage>, String>;
+
 /// Expands the AUR-only dependency graph of `roots`, deps-first (every root
-/// itself comes last, roots in the order given). `info(name)` returns the AUR
-/// package or `Ok(None)` when the name is a repository package (or absent);
-/// `installed(name)` reports whether pacman already satisfies it. A dependency
-/// cycle fails the expansion instead of looping.
+/// itself comes last, roots in the order given). `info(names)` returns the
+/// AUR packages among the given names; repository packages are simply absent.
+/// It is called in one batch per level, so a many-package upgrade stays a
+/// handful of requests. `installed(name)` reports whether pacman already
+/// satisfies it. A dependency cycle fails the expansion instead of looping.
 fn expand_chain(
     roots: &[String],
-    info: &dyn Fn(&str) -> Result<Option<AurPackage>, String>,
+    info: &InfoFn,
     installed: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<AurPackage>, String> {
-    #[derive(Clone)]
-    enum Frame {
-        Expand(String, Vec<String>),
-        Emit(AurPackage),
-    }
-    let mut order: Vec<AurPackage> = Vec::new();
-    let mut done: HashSet<String> = HashSet::new();
-    let mut stack: Vec<Frame> = roots
+    let mut levels: Vec<Vec<AurPackage>> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut frontier: Vec<(String, Vec<String>)> = roots
         .iter()
-        .rev()
-        .map(|root| Frame::Expand(root.clone(), Vec::new()))
+        .map(|root| {
+            seen.insert(root.clone());
+            (root.clone(), Vec::new())
+        })
         .collect();
-    while let Some(frame) = stack.pop() {
-        match frame {
-            Frame::Emit(pkg) => order.push(pkg),
-            Frame::Expand(name, path) => {
-                if done.contains(&name) {
-                    continue;
-                }
-                let Some(pkg) = info(&name)? else {
-                    continue;
-                };
-                done.insert(name.clone());
-                let deps = dep_names_of(&pkg);
-                stack.push(Frame::Emit(pkg));
-                for dep in deps {
-                    if installed(&dep) {
-                        continue;
-                    }
-                    let mut child_path = path.clone();
-                    child_path.push(name.clone());
-                    if let Some(pos) = child_path.iter().position(|p| p == &dep) {
-                        let mut cycle: Vec<&str> =
-                            child_path[pos..].iter().map(String::as_str).collect();
-                        cycle.push(dep.as_str());
-                        return Err(format!("dependency cycle: {}", cycle.join(" -> ")));
-                    }
-                    if done.contains(&dep) {
-                        continue;
-                    }
-                    stack.push(Frame::Expand(dep, child_path));
-                }
+    while !frontier.is_empty() {
+        let names: Vec<String> = frontier.iter().map(|(name, _)| name.clone()).collect();
+        let mut by_name: HashMap<String, AurPackage> = HashMap::new();
+        for chunk in names.chunks(50) {
+            for pkg in info(chunk)? {
+                by_name.insert(pkg.name.clone(), pkg);
             }
         }
+        let mut next: Vec<(String, Vec<String>)> = Vec::new();
+        let mut level: Vec<AurPackage> = Vec::new();
+        for (name, path) in frontier {
+            let Some(pkg) = by_name.get(&name).cloned() else {
+                continue;
+            };
+            level.push(pkg);
+            for dep in dep_names_of(by_name.get(&name).unwrap()) {
+                if installed(&dep) {
+                    continue;
+                }
+                if let Some(pos) = path.iter().position(|p| p == &dep) {
+                    let mut cycle: Vec<&str> = path[pos..].iter().map(String::as_str).collect();
+                    cycle.push(name.as_str());
+                    cycle.push(dep.as_str());
+                    return Err(format!("dependency cycle: {}", cycle.join(" -> ")));
+                }
+                if seen.contains(&dep) {
+                    continue;
+                }
+                seen.insert(dep.clone());
+                let mut child_path = path.clone();
+                child_path.push(name.clone());
+                next.push((dep, child_path));
+            }
+        }
+        if !level.is_empty() {
+            levels.push(level);
+        }
+        frontier = next;
+    }
+    let mut order: Vec<AurPackage> = Vec::new();
+    for level in levels.into_iter().rev() {
+        order.extend(level);
     }
     Ok(order)
 }
@@ -435,14 +445,9 @@ impl AurBackend {
     /// Shared walk for installs and upgrades: expands the AUR-only graph of
     /// `roots` and plans each node in dependency order.
     fn expand_and_plan(&self, roots: &[String]) -> Result<Vec<TransactionPlan>, String> {
-        let chain = expand_chain(
-            roots,
-            &|name| {
-                rpc::info_by_name(&[name.to_string()])
-                    .map(|pkgs| pkgs.into_iter().find(|p| p.name == name))
-            },
-            &|name| installed_desc(name).ok().flatten().is_some(),
-        )?;
+        let chain = expand_chain(roots, &|names| rpc::info_by_name(names), &|name| {
+            installed_desc(name).ok().flatten().is_some()
+        })?;
         if chain.is_empty() {
             return Err("not found in AUR".into());
         }
@@ -819,13 +824,12 @@ makedepends_x86_64 = cmake
             pkg("c", &[]),
             pkg("d", &[]),
         ];
-        let find = |name: &str| {
-            table
+        let find = move |names: &[String]| {
+            Ok(table
                 .iter()
-                .find(|p| p.name == name)
+                .filter(|p| names.iter().any(|n| n == &p.name))
                 .cloned()
-                .ok_or_else(|| format!("no info for {name}"))
-                .map(Some)
+                .collect::<Vec<_>>())
         };
         let chain = expand_chain(&["a".to_string()], &find, &|_| false).unwrap();
         assert_eq!(names(&chain), vec!["c", "b", "a"]);
@@ -839,13 +843,12 @@ makedepends_x86_64 = cmake
             pkg("c", &["d"]),
             pkg("d", &[]),
         ];
-        let find = |name: &str| {
-            table
+        let find = move |names: &[String]| {
+            Ok(table
                 .iter()
-                .find(|p| p.name == name)
+                .filter(|p| names.iter().any(|n| n == &p.name))
                 .cloned()
-                .ok_or_else(|| format!("no info for {name}"))
-                .map(Some)
+                .collect::<Vec<_>>())
         };
         let chain = expand_chain(&["a".to_string()], &find, &|_| false).unwrap();
         let order = names(&chain);
@@ -857,13 +860,12 @@ makedepends_x86_64 = cmake
     #[test]
     fn expand_chain_reports_cycles() {
         let table = [pkg("a", &["b"]), pkg("b", &["a"])];
-        let find = |name: &str| {
-            table
+        let find = move |names: &[String]| {
+            Ok(table
                 .iter()
-                .find(|p| p.name == name)
+                .filter(|p| names.iter().any(|n| n == &p.name))
                 .cloned()
-                .ok_or_else(|| format!("no info for {name}"))
-                .map(Some)
+                .collect::<Vec<_>>())
         };
         let err = expand_chain(&["a".to_string()], &find, &|_| false).unwrap_err();
         assert!(err.contains("a -> b -> a"), "got: {err}");
@@ -872,13 +874,12 @@ makedepends_x86_64 = cmake
     #[test]
     fn expand_chain_skips_installed_and_repo_deps() {
         let table = [pkg("a", &["b", "c"]), pkg("c", &[])];
-        let find = |name: &str| {
-            table
+        let find = move |names: &[String]| {
+            Ok(table
                 .iter()
-                .find(|p| p.name == name)
+                .filter(|p| names.iter().any(|n| n == &p.name))
                 .cloned()
-                .ok_or_else(|| format!("no info for {name}"))
-                .map(Some)
+                .collect::<Vec<_>>())
         };
         let chain = expand_chain(&["a".to_string()], &find, &|name| name == "b").unwrap();
         assert_eq!(names(&chain), vec!["c", "a"]);
@@ -898,13 +899,12 @@ makedepends_x86_64 = cmake
     #[test]
     fn aur_plan_chain_puts_target_last() {
         let table = [pkg("a", &["b"]), pkg("b", &[])];
-        let find = |name: &str| {
-            table
+        let find = move |names: &[String]| {
+            Ok(table
                 .iter()
-                .find(|p| p.name == name)
+                .filter(|p| names.iter().any(|n| n == &p.name))
                 .cloned()
-                .ok_or_else(|| format!("no info for {name}"))
-                .map(Some)
+                .collect::<Vec<_>>())
         };
         let chain = expand_chain(&["a".to_string()], &find, &|_| false).unwrap();
         assert_eq!(chain.last().unwrap().name, "a");
@@ -914,13 +914,12 @@ makedepends_x86_64 = cmake
     #[test]
     fn expand_chain_multi_root_shares_deps() {
         let table = [pkg("a", &["b"]), pkg("c", &["b"]), pkg("b", &[])];
-        let find = |name: &str| {
-            table
+        let find = move |names: &[String]| {
+            Ok(table
                 .iter()
-                .find(|p| p.name == name)
+                .filter(|p| names.iter().any(|n| n == &p.name))
                 .cloned()
-                .ok_or_else(|| format!("no info for {name}"))
-                .map(Some)
+                .collect::<Vec<_>>())
         };
         let roots = ["a".to_string(), "c".to_string()];
         let chain = expand_chain(&roots, &find, &|_| false).unwrap();
